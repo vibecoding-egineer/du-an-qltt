@@ -1,0 +1,6 @@
+{
+  "name": "Eduspace",
+  "description": "Hệ thống quản lý trung tâm giáo dục & điểm danh khuôn mặt thông minh",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
