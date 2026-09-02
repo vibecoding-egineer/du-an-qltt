@@ -3,6 +3,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { requireAuth, type AuthRequest } from "./src/middleware/auth.js";
+import { requireRole, requirePermission } from "./src/middleware/rbac.js";
 import { getOrCreateUser } from "./src/db/users.js";
 import { db } from "./src/db/index.js";
 import { branches, classes, students, users, attendance, settings, transactions, promotions, classEnrollments } from "./src/db/schema.js";
@@ -131,14 +132,9 @@ async function startServer() {
     }
   });
 
-  app.post("/api/users", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/users", requireAuth, requireRole(['admin']), async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
-      const adminCheck = await db.select().from(users).where(eq(users.uid, req.user!.uid));
-      if (!adminCheck[0] || adminCheck[0].role !== 'admin') {
-        return res.status(403).json({ error: "Chỉ quản trị viên mới được phép thực hiện" });
-      }
-
       const { email, name, role, employeeCode, branchId, permissions } = req.body;
       
       // Check if user already exists across the whole system
@@ -169,15 +165,9 @@ async function startServer() {
     }
   });
 
-  app.put("/api/users/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.put("/api/users/:id", requireAuth, requireRole(['admin']), async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
-      // Basic authorization - check if requesting user is an admin
-      const adminCheck = await db.select().from(users).where(eq(users.uid, req.user!.uid));
-      if (!adminCheck[0] || adminCheck[0].role !== 'admin') {
-        return res.status(403).json({ error: "Chỉ quản trị viên mới được phép thực hiện" });
-      }
-
       const { id } = req.params;
       const { role, permissions } = req.body;
 
@@ -223,15 +213,9 @@ async function startServer() {
     }
   });
 
-  app.put("/api/settings", requireAuth, async (req: AuthRequest, res) => {
+  app.put("/api/settings", requireAuth, requireRole(['admin']), async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
-      
-      // Ensure only admins can update settings
-      if (req.dbUser?.role && req.dbUser.role !== 'admin') {
-        return res.status(403).json({ error: "Only admins can update settings" });
-      }
-      
       const { centerName, logoUrl } = req.body;
       
       let result = await db.select().from(settings).where(eq(settings.tenantId, tenantId)).limit(1);
@@ -273,7 +257,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/branches", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/branches", requireAuth, requireRole(['admin']), async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { name, code, phone, address } = req.body;
@@ -285,7 +269,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/branches/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.put("/api/branches/:id", requireAuth, requireRole(['admin']), async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { name, code, phone, address } = req.body;
@@ -331,11 +315,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/classes", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/classes", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot create classes." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       let { branchId, name, program, tuition, teacherId, sessionsPerMonth, feeMethod } = req.body;
       
@@ -364,11 +345,8 @@ async function startServer() {
     }
   });
 
-  app.put("/api/classes/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.put("/api/classes/:id", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot edit classes." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { id } = req.params;
       let { branchId, name, program, tuition, teacherId, sessionsPerMonth, feeMethod } = req.body;
@@ -401,11 +379,8 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/classes/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.delete("/api/classes/:id", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot delete classes." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { id } = req.params;
       const classId = parseInt(id);
@@ -440,10 +415,30 @@ async function startServer() {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { id } = req.params;
       const { faceDescriptor } = req.body;
+      const studentId = parseInt(id);
+
+      // Trước đây route này KHÔNG kiểm tra gì cả - bất kỳ ai đăng nhập cũng ghi đè
+      // được khuôn mặt của bất kỳ học viên nào trong tenant, kể cả khác chi nhánh.
+      // Giờ: user không phải admin chỉ được đăng ký/cập nhật khuôn mặt cho học viên
+      // đang có ít nhất 1 lớp thuộc đúng chi nhánh của mình.
+      if (req.dbUser?.role !== 'admin' && req.dbUser?.branchId) {
+        const allowed = await db.select({ id: classEnrollments.id })
+          .from(classEnrollments)
+          .innerJoin(classes, eq(classEnrollments.classId, classes.id))
+          .where(and(
+            eq(classEnrollments.studentId, studentId),
+            eq(classEnrollments.tenantId, tenantId),
+            eq(classEnrollments.isDeleted, false),
+            eq(classes.branchId, req.dbUser.branchId)
+          )).limit(1);
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Bạn không có quyền cập nhật khuôn mặt của học viên ngoài chi nhánh mình." });
+        }
+      }
       
       const result = await db.update(students)
         .set({ faceDescriptor: JSON.stringify(faceDescriptor) })
-        .where(and(eq(students.id, parseInt(id)), eq(students.tenantId, tenantId), eq(students.isDeleted, false)))
+        .where(and(eq(students.id, studentId), eq(students.tenantId, tenantId), eq(students.isDeleted, false)))
         .returning();
       res.json(result[0]);
     } catch (error: any) {
@@ -559,11 +554,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/students", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/students", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot register students." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { 
         name, studentCode, phone, classId, tuitionStatus, tuitionOwed,
@@ -619,11 +611,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/students/bulk", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/students/bulk", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot register students." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { classId, studentsData } = req.body;
 
@@ -733,11 +722,8 @@ async function startServer() {
     }
   });
 
-  app.put("/api/students/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.put("/api/students/:id", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot edit students." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { id } = req.params;
       const { name, phone, classId, tuitionStatus, tuitionOwed } = req.body;
@@ -762,11 +748,8 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/students/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.delete("/api/students/:id", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot delete students." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { id } = req.params;
       const studentId = parseInt(id);
@@ -969,11 +952,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/transactions", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/transactions", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot create transactions." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       let { branchId, type, category, amount, date, note, studentId } = req.body;
       
@@ -1002,11 +982,8 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/transactions/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.delete("/api/transactions/:id", requireAuth, requireRole(['admin', 'manager', 'staff']), async (req: AuthRequest, res) => {
     try {
-      if (req.dbUser?.role === 'teacher') {
-         return res.status(403).json({ error: "Teachers cannot delete transactions." });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       
       const result = await db.update(transactions)
@@ -1034,13 +1011,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/promotions", requireAuth, async (req: AuthRequest, res) => {
+  app.post("/api/promotions", requireAuth, requirePermission('/promotions'), async (req: AuthRequest, res) => {
     try {
-      const isAdmin = req.dbUser?.role === 'admin';
-      const hasPromoPerm = req.dbUser?.permissions?.includes('/promotions');
-      if (!isAdmin && !hasPromoPerm) {
-        return res.status(403).json({ error: "Không có quyền" });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { name, discountType, discountValue, branchIds, startDate, endDate, isActive } = req.body;
 
@@ -1066,13 +1038,8 @@ async function startServer() {
     }
   });
 
-  app.put("/api/promotions/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.put("/api/promotions/:id", requireAuth, requirePermission('/promotions'), async (req: AuthRequest, res) => {
     try {
-      const isAdmin = req.dbUser?.role === 'admin';
-      const hasPromoPerm = req.dbUser?.permissions?.includes('/promotions');
-      if (!isAdmin && !hasPromoPerm) {
-        return res.status(403).json({ error: "Không có quyền" });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const promoId = parseInt(req.params.id);
       const { name, discountType, discountValue, branchIds, startDate, endDate, isActive } = req.body;
@@ -1105,13 +1072,8 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/promotions/:id", requireAuth, async (req: AuthRequest, res) => {
+  app.delete("/api/promotions/:id", requireAuth, requirePermission('/promotions'), async (req: AuthRequest, res) => {
     try {
-      const isAdmin = req.dbUser?.role === 'admin';
-      const hasPromoPerm = req.dbUser?.permissions?.includes('/promotions');
-      if (!isAdmin && !hasPromoPerm) {
-        return res.status(403).json({ error: "Không có quyền" });
-      }
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const promoId = parseInt(req.params.id);
 

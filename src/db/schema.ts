@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm';
-import { integer, pgTable, serial, text, timestamp, json, boolean, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { integer, pgTable, serial, text, timestamp, json, boolean, index, uniqueIndex, pgEnum } from 'drizzle-orm/pg-core';
 
 export const settings = pgTable('settings', {
   id: serial('id').primaryKey(),
@@ -67,6 +67,7 @@ export const students = pgTable('students', {
   address: text('address'), // Địa chỉ
   note: text('note'), // Ghi chú
   faceDescriptor: text('face_descriptor'), // JSON stringified array of floats
+  hanetPersonId: text('hanet_person_id'), // ID định danh FaceID bên hệ thống Hanet, dùng để khớp check-in từ camera
   isDeleted: boolean('is_deleted').notNull().default(false),
   deletedAt: timestamp('deleted_at'),
   createdAt: timestamp('created_at').defaultNow(),
@@ -77,6 +78,12 @@ export const students = pgTable('students', {
   uniqueIndex('students_tenant_code_active_unique')
     .on(table.tenantId, table.studentCode)
     .where(sql`${table.isDeleted} = false`),
+  // 1 FaceID bên Hanet chỉ được gắn với đúng 1 học viên đang hoạt động tại 1 thời điểm.
+  // Cho phép NULL (học viên chưa liên kết Hanet), và cho phép gắn lại cho học viên khác
+  // nếu học viên cũ từng giữ FaceID đó đã bị xóa mềm.
+  uniqueIndex('students_hanet_person_id_active_unique')
+    .on(table.hanetPersonId)
+    .where(sql`${table.isDeleted} = false AND ${table.hanetPersonId} IS NOT NULL`),
 ]);
 
 
@@ -202,3 +209,75 @@ export const promotions = pgTable('promotions', {
 }, (table) => [
   index('promotions_tenant_id_idx').on(table.tenantId),
 ]);
+
+// ===== Tích hợp camera Hanet AI =====
+
+export const hanetPendingCheckinReason = pgEnum('hanet_pending_checkin_reason', [
+  'unlinked_face',           // personID chưa được gán cho học viên nào trong hệ thống
+  'no_active_class',         // đã tìm ra học viên, nhưng học viên không còn ghi danh lớp nào
+  'no_open_session',         // có lớp nhưng không lớp nào đang mở phiên điểm danh
+  'multiple_open_sessions',  // nhiều hơn 1 lớp của học viên cùng đang mở phiên
+]);
+
+// Giáo viên/lễ tân bấm "mở" trước khi buổi học bắt đầu, để hệ thống biết check-in
+// từ camera Hanet trong khoảng thời gian này thuộc về lớp nào. Hết hiệu lực sau một
+// khoảng thời gian cố định (xử lý ở tầng ứng dụng khi truy vấn, xem server.ts), hoặc
+// đóng sớm bằng cách set closedAt.
+export const attendanceSessions = pgTable('attendance_sessions', {
+  id: serial('id').primaryKey(),
+  tenantId: text('tenant_id').notNull(),
+  classId: integer('class_id').references(() => classes.id).notNull(),
+  openedBy: integer('opened_by').references(() => users.id).notNull(),
+  openedAt: timestamp('opened_at').notNull().defaultNow(),
+  closedAt: timestamp('closed_at'), // null = chưa chủ động đóng (có thể vẫn đã hết hạn theo thời gian)
+  createdAt: timestamp('created_at').defaultNow(),
+}, (table) => [
+  index('attendance_sessions_tenant_id_idx').on(table.tenantId),
+  index('attendance_sessions_class_id_idx').on(table.classId),
+]);
+
+// Hàng đợi các check-in từ camera Hanet mà hệ thống KHÔNG tự tin gán được vào đúng 1
+// lớp cụ thể (lý do cụ thể xem enum reason ở trên). Nhân viên xử lý thủ công qua UI,
+// chọn lớp rồi hệ thống mới thực sự tạo bản ghi trong bảng `attendance`.
+export const hanetPendingCheckins = pgTable('hanet_pending_checkins', {
+  id: serial('id').primaryKey(),
+  tenantId: text('tenant_id').notNull(),
+  hanetRecordId: text('hanet_record_id').notNull(), // trường "id" Hanet gửi kèm - chống xử lý trùng nếu webhook gọi lại
+  hanetPersonId: text('hanet_person_id').notNull(),
+  personName: text('person_name'), // tên Hanet gửi kèm, hiển thị tạm khi chưa liên kết được học viên
+  studentId: integer('student_id').references(() => students.id), // null nếu chưa liên kết được học viên nào
+  candidateClassIds: integer('candidate_class_ids').array(), // các lớp khả dĩ, để UI cho chọn nhanh
+  checkinTime: timestamp('checkin_time').notNull(),
+  imageUrl: text('image_url'), // detected_image_url Hanet gửi kèm, để nhân viên đối chiếu bằng mắt
+  reason: hanetPendingCheckinReason('reason').notNull(),
+  resolvedAt: timestamp('resolved_at'),
+  resolvedClassId: integer('resolved_class_id').references(() => classes.id),
+  resolvedBy: integer('resolved_by').references(() => users.id),
+  createdAt: timestamp('created_at').defaultNow(),
+}, (table) => [
+  index('hanet_pending_checkins_tenant_id_idx').on(table.tenantId),
+  index('hanet_pending_checkins_student_id_idx').on(table.studentId),
+  uniqueIndex('hanet_pending_checkins_record_id_unique').on(table.hanetRecordId),
+]);
+
+export const attendanceSessionsRelations = relations(attendanceSessions, ({ one }) => ({
+  class: one(classes, {
+    fields: [attendanceSessions.classId],
+    references: [classes.id],
+  }),
+  openedByUser: one(users, {
+    fields: [attendanceSessions.openedBy],
+    references: [users.id],
+  }),
+}));
+
+export const hanetPendingCheckinsRelations = relations(hanetPendingCheckins, ({ one }) => ({
+  student: one(students, {
+    fields: [hanetPendingCheckins.studentId],
+    references: [students.id],
+  }),
+  resolvedClass: one(classes, {
+    fields: [hanetPendingCheckins.resolvedClassId],
+    references: [classes.id],
+  }),
+}));
