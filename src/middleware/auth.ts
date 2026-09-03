@@ -5,9 +5,13 @@ import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
+// Kiểu dữ liệu người dùng lấy từ bảng `users`, suy ra tự động từ schema Drizzle
+// (không khai báo tay để tránh lệch khi schema.ts thay đổi).
+export type DbUser = typeof users.$inferSelect;
+
 export interface AuthRequest extends Request {
   user?: DecodedIdToken;
-  dbUser?: any;
+  dbUser?: DbUser;
 }
 
 export const requireAuth = async (

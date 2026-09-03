@@ -6,9 +6,10 @@ import { requireAuth, type AuthRequest } from "./src/middleware/auth.js";
 import { requireRole, requirePermission } from "./src/middleware/rbac.js";
 import { getOrCreateUser } from "./src/db/users.js";
 import { db } from "./src/db/index.js";
-import { branches, classes, students, users, attendance, settings, transactions, promotions, classEnrollments } from "./src/db/schema.js";
-import { eq, and, desc, gte, lte, inArray, sql } from "drizzle-orm";
+import { branches, classes, students, users, attendance, settings, transactions, promotions, classEnrollments, attendanceSessions, hanetPendingCheckins } from "./src/db/schema.js";
+import { eq, and, desc, gte, lte, inArray, sql, isNull } from "drizzle-orm";
 import { getAuth } from "firebase-admin/auth";
+import { verifyHanetHash, parseHanetTime, HANET_RECOGNIZED_PERSON_TYPES, type HanetWebhookPayload } from "./src/lib/hanet.js";
 
 async function startServer() {
   const app = express();
@@ -113,6 +114,162 @@ async function startServer() {
     } catch (error: any) {
       console.error(error);
       res.status(500).json({ error: "Failed to join center" });
+    }
+  });
+
+  // ===== Webhook Hanet AI Camera =====
+  // Route CÔNG KHAI - Hanet gọi trực tiếp từ camera/cloud của họ, KHÔNG có Firebase token nên
+  // KHÔNG qua requireAuth. Bảo mật bằng cách tự tính lại hash = MD5(client_secret + id) và so
+  // khớp với hash Hanet gửi kèm mỗi request. Sai hash bị từ chối ngay, không chạm tới DB.
+  const HANET_SESSION_EXPIRY_HOURS = 3;
+
+  app.post("/api/webhooks/hanet", async (req, res) => {
+    try {
+      const payload = req.body as HanetWebhookPayload;
+      const clientSecret = process.env.HANET_CLIENT_SECRET;
+
+      if (!clientSecret) {
+        console.error("Hanet webhook: thiếu HANET_CLIENT_SECRET trong .env, từ chối toàn bộ request.");
+        return res.status(500).json({ error: "Server misconfigured" });
+      }
+
+      if (!verifyHanetHash(payload.id, payload.hash, clientSecret)) {
+        console.warn("Hanet webhook: hash không hợp lệ, từ chối request.", { id: payload.id });
+        return res.status(401).json({ error: "Invalid signature" });
+      }
+
+      // Chỉ xử lý sâu sự kiện check-in (data_type = 'log'). Các loại khác (device/person/place)
+      // tạm thời chỉ ghi log để biết là có xảy ra, chưa xử lý nghiệp vụ gì thêm.
+      if (payload.data_type !== 'log') {
+        console.log(`Hanet webhook: nhận sự kiện data_type="${payload.data_type}" action_type="${payload.action_type}" - chỉ ghi nhận, chưa xử lý sâu.`);
+        return res.status(200).json({ received: true });
+      }
+
+      const { personID, personType, personName, detected_image_url } = payload;
+      const checkinTime = parseHanetTime(payload.time);
+
+      if (!personID || personType === undefined || !HANET_RECOGNIZED_PERSON_TYPES.includes(personType)) {
+        // Người lạ / báo cháy / ảnh chụp thủ công / dữ liệu thiếu trường - bỏ qua, không tạo gì cả.
+        return res.status(200).json({ received: true, processed: false });
+      }
+
+      // Tra học viên theo hanetPersonId (chỉ tính học viên chưa xóa mềm)
+      const matchedStudents = await db.select().from(students)
+        .where(and(eq(students.hanetPersonId, personID), eq(students.isDeleted, false)))
+        .limit(1);
+
+      if (matchedStudents.length === 0) {
+        // Chưa có học viên nào liên kết với FaceID này trong hệ thống - nghĩa là cũng chưa thể
+        // biết chắc tenant nào. Hạn chế đã biết: nếu sau này nhiều trung tâm cùng dùng chung
+        // server này với các App Hanet riêng, cần ánh xạ theo `keycode` thay vì biến môi trường
+        // cố định. Hiện tại dùng HANET_DEFAULT_TENANT_ID vì hệ thống mới có 1 trung tâm.
+        const fallbackTenantId = process.env.HANET_DEFAULT_TENANT_ID || 'default-tenant';
+        await db.insert(hanetPendingCheckins).values({
+          tenantId: fallbackTenantId,
+          hanetRecordId: payload.id,
+          hanetPersonId: personID,
+          personName: personName || null,
+          studentId: null,
+          candidateClassIds: null,
+          checkinTime,
+          imageUrl: detected_image_url || null,
+          reason: 'unlinked_face',
+        }).onConflictDoNothing({ target: hanetPendingCheckins.hanetRecordId });
+        return res.status(200).json({ received: true, processed: false });
+      }
+
+      const student = matchedStudents[0];
+      const tenantId = student.tenantId;
+
+      // Các lớp học viên đang ghi danh (chưa xóa mềm)
+      const enrollments = await db.select({ classId: classEnrollments.classId })
+        .from(classEnrollments)
+        .where(and(
+          eq(classEnrollments.studentId, student.id),
+          eq(classEnrollments.tenantId, tenantId),
+          eq(classEnrollments.isDeleted, false)
+        ));
+
+      if (enrollments.length === 0) {
+        await db.insert(hanetPendingCheckins).values({
+          tenantId,
+          hanetRecordId: payload.id,
+          hanetPersonId: personID,
+          personName: personName || student.name,
+          studentId: student.id,
+          candidateClassIds: [],
+          checkinTime,
+          imageUrl: detected_image_url || null,
+          reason: 'no_active_class',
+        }).onConflictDoNothing({ target: hanetPendingCheckins.hanetRecordId });
+        return res.status(200).json({ received: true, processed: false });
+      }
+
+      const candidateClassIds = enrollments.map(e => e.classId);
+
+      // Tìm phiên điểm danh đang mở (chưa đóng tay, chưa quá hạn) trong số các lớp học viên
+      // đang học. Bắt buộc phải có ĐÚNG 1 phiên khớp mới tự động ghi điểm danh - áp dụng như
+      // nhau dù học viên học 1 hay nhiều lớp, không có ngoại lệ.
+      const sessionExpiry = new Date(Date.now() - HANET_SESSION_EXPIRY_HOURS * 60 * 60 * 1000);
+      const openSessions = await db.select().from(attendanceSessions)
+        .where(and(
+          inArray(attendanceSessions.classId, candidateClassIds),
+          eq(attendanceSessions.tenantId, tenantId),
+          isNull(attendanceSessions.closedAt),
+          gte(attendanceSessions.openedAt, sessionExpiry)
+        ));
+
+      if (openSessions.length !== 1) {
+        await db.insert(hanetPendingCheckins).values({
+          tenantId,
+          hanetRecordId: payload.id,
+          hanetPersonId: personID,
+          personName: personName || student.name,
+          studentId: student.id,
+          candidateClassIds,
+          checkinTime,
+          imageUrl: detected_image_url || null,
+          reason: openSessions.length === 0 ? 'no_open_session' : 'multiple_open_sessions',
+        }).onConflictDoNothing({ target: hanetPendingCheckins.hanetRecordId });
+        return res.status(200).json({ received: true, processed: false });
+      }
+
+      // Đúng 1 phiên khớp - tự động ghi điểm danh, tái sử dụng đúng logic upsert an toàn của
+      // route POST /api/attendance: xóa mềm bản ghi cùng ngày nếu có, rồi ghi bản ghi mới,
+      // toàn bộ trong 1 transaction để không bao giờ mất điểm danh cũ mà không có bản ghi thay thế.
+      const matchedClassId = openSessions[0].classId;
+      const startOfDay = new Date(checkinTime); startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(checkinTime); endOfDay.setHours(23, 59, 59, 999);
+
+      await db.transaction(async (tx) => {
+        await tx.update(attendance)
+          .set({ isDeleted: true, deletedAt: new Date() })
+          .where(and(
+            eq(attendance.tenantId, tenantId),
+            eq(attendance.studentId, student.id),
+            eq(attendance.classId, matchedClassId),
+            eq(attendance.isDeleted, false),
+            gte(attendance.date, startOfDay),
+            lte(attendance.date, endOfDay)
+          ));
+
+        await tx.insert(attendance).values({
+          tenantId,
+          studentId: student.id,
+          classId: matchedClassId,
+          date: checkinTime,
+          status: 'present',
+          note: 'Điểm danh tự động qua camera Hanet',
+        });
+      });
+
+      res.status(200).json({ received: true, processed: true });
+    } catch (error: any) {
+      console.error("Lỗi xử lý webhook Hanet:", error);
+      // Khác với các nhánh nghiệp vụ ở trên (luôn trả 200 kể cả khi đưa vào hàng chờ),
+      // lỗi hệ thống thật sự (DB lỗi, timeout...) trả 500 để Hanet có cơ hội gửi lại,
+      // tránh mất hẳn sự kiện chỉ vì một trục trặc tạm thời.
+      res.status(500).json({ error: "Internal error" });
     }
   });
 
