@@ -1059,6 +1059,265 @@ async function startServer() {
     }
   });
 
+  // ===== Phiên điểm danh (dùng để khớp check-in camera Hanet vào đúng lớp) =====
+  app.post("/api/attendance-sessions", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.dbUser) {
+        return res.status(403).json({ error: "Không xác định được người dùng" });
+      }
+      const tenantId = req.dbUser.tenantId || req.user!.uid;
+      const { classId } = req.body;
+
+      if (!classId || isNaN(parseInt(classId))) {
+        return res.status(400).json({ error: "classId là bắt buộc" });
+      }
+      const parsedClassId = parseInt(classId);
+
+      // Cùng quy tắc phân quyền theo lớp như các route khác: giáo viên chỉ mở được phiên cho
+      // lớp mình dạy, nhân viên/quản lý chi nhánh chỉ mở được cho lớp thuộc chi nhánh mình.
+      if (req.dbUser.role === 'teacher') {
+        const allowed = await db.select({ id: classes.id }).from(classes)
+          .where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.id, parsedClassId), eq(classes.isDeleted, false)));
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Bạn không phụ trách lớp này" });
+        }
+      } else if (req.dbUser.role !== 'admin' && req.dbUser.branchId) {
+        const allowed = await db.select({ id: classes.id }).from(classes)
+          .where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parsedClassId), eq(classes.isDeleted, false)));
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Lớp này không thuộc chi nhánh của bạn" });
+        }
+      }
+
+      // Nếu lớp này đã có 1 phiên đang mở (chưa đóng, chưa quá hạn) thì trả về luôn phiên đó,
+      // không tạo trùng - tránh trường hợp bấm nhầm 2 lần tạo ra 2 phiên cùng mở cho 1 lớp,
+      // vì điều đó sẽ khiến webhook hiểu nhầm thành "nhiều phiên cùng mở" (multiple_open_sessions).
+      const sessionExpiry = new Date(Date.now() - HANET_SESSION_EXPIRY_HOURS * 60 * 60 * 1000);
+      const existingOpen = await db.select().from(attendanceSessions)
+        .where(and(
+          eq(attendanceSessions.classId, parsedClassId),
+          eq(attendanceSessions.tenantId, tenantId),
+          isNull(attendanceSessions.closedAt),
+          gte(attendanceSessions.openedAt, sessionExpiry)
+        )).limit(1);
+
+      if (existingOpen.length > 0) {
+        return res.json(existingOpen[0]);
+      }
+
+      const result = await db.insert(attendanceSessions).values({
+        tenantId,
+        classId: parsedClassId,
+        openedBy: req.dbUser.id,
+      }).returning();
+
+      res.json(result[0]);
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to open attendance session" });
+    }
+  });
+
+  app.put("/api/attendance-sessions/:id/close", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.dbUser) {
+        return res.status(403).json({ error: "Không xác định được người dùng" });
+      }
+      const tenantId = req.dbUser.tenantId || req.user!.uid;
+      const sessionId = parseInt(req.params.id);
+
+      const existing = await db.select().from(attendanceSessions)
+        .where(and(eq(attendanceSessions.id, sessionId), eq(attendanceSessions.tenantId, tenantId)))
+        .limit(1);
+
+      if (existing.length === 0) {
+        return res.status(404).json({ error: "Không tìm thấy phiên điểm danh" });
+      }
+      const session = existing[0];
+
+      if (req.dbUser.role === 'teacher') {
+        const allowed = await db.select({ id: classes.id }).from(classes)
+          .where(and(eq(classes.id, session.classId), eq(classes.teacherId, req.dbUser.id)));
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Bạn không phụ trách lớp này" });
+        }
+      } else if (req.dbUser.role !== 'admin' && req.dbUser.branchId) {
+        const allowed = await db.select({ id: classes.id }).from(classes)
+          .where(and(eq(classes.id, session.classId), eq(classes.branchId, req.dbUser.branchId)));
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Lớp này không thuộc chi nhánh của bạn" });
+        }
+      }
+
+      // Điều kiện isNull(closedAt) làm cho việc đóng phiên trở nên "vô hại khi lặp lại":
+      // bấm đóng 2 lần không gây lỗi, lần 2 chỉ đơn giản không đổi gì thêm.
+      const result = await db.update(attendanceSessions)
+        .set({ closedAt: new Date() })
+        .where(and(eq(attendanceSessions.id, sessionId), eq(attendanceSessions.tenantId, tenantId), isNull(attendanceSessions.closedAt)))
+        .returning();
+
+      res.json(result[0] || session);
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to close attendance session" });
+    }
+  });
+
+  // ===== Hàng đợi check-in Hanet chưa xác định được lớp =====
+  // GET để liệt kê hàng chờ - cần thiết để endpoint resolve/dismiss bên dưới thực sự dùng được
+  // (không có cách nào chọn "1 dòng để xử lý" nếu không có gì hiển thị danh sách trước).
+  app.get("/api/hanet-pending-checkins", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const tenantId = req.dbUser?.tenantId || req.user!.uid;
+
+      // Ghi chú: chưa lọc theo chi nhánh ở đây (candidateClassIds là mảng, lọc theo chi nhánh
+      // cần so khớp mảng phức tạp hơn). Hàng đợi này thường ít dòng và cần xử lý nhanh, không
+      // phải dữ liệu nhạy cảm dài hạn, nên tạm thời mọi nhân viên trong tenant đều xem chung.
+      const result = await db.select().from(hanetPendingCheckins)
+        .where(and(eq(hanetPendingCheckins.tenantId, tenantId), isNull(hanetPendingCheckins.resolvedAt)))
+        .orderBy(desc(hanetPendingCheckins.checkinTime));
+
+      res.json(result);
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to fetch pending checkins" });
+    }
+  });
+
+  app.put("/api/hanet-pending-checkins/:id/resolve", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.dbUser) {
+        return res.status(403).json({ error: "Không xác định được người dùng" });
+      }
+      const tenantId = req.dbUser.tenantId || req.user!.uid;
+      const pendingId = parseInt(req.params.id);
+      const { classId, studentId } = req.body;
+
+      if (!classId || isNaN(parseInt(classId))) {
+        return res.status(400).json({ error: "classId là bắt buộc" });
+      }
+      const parsedClassId = parseInt(classId);
+
+      const pendingRows = await db.select().from(hanetPendingCheckins)
+        .where(and(eq(hanetPendingCheckins.id, pendingId), eq(hanetPendingCheckins.tenantId, tenantId)))
+        .limit(1);
+      if (pendingRows.length === 0) {
+        return res.status(404).json({ error: "Không tìm thấy check-in này" });
+      }
+      const pending = pendingRows[0];
+      if (pending.resolvedAt) {
+        return res.status(400).json({ error: "Check-in này đã được xử lý trước đó" });
+      }
+
+      let resolvedStudentId = pending.studentId;
+
+      // Trường hợp 'unlinked_face': hàng chờ chưa gắn học viên nào, nhân viên phải chọn học viên
+      // để liên kết lần đầu. Từ lần check-in sau, webhook sẽ tự khớp được luôn, không cần lặp lại bước này.
+      if (!resolvedStudentId) {
+        if (!studentId) {
+          return res.status(400).json({ error: "Cần chọn học viên để liên kết với khuôn mặt Hanet này" });
+        }
+        const targetStudent = await db.select().from(students)
+          .where(and(eq(students.id, parseInt(studentId)), eq(students.tenantId, tenantId), eq(students.isDeleted, false)))
+          .limit(1);
+        if (targetStudent.length === 0) {
+          return res.status(404).json({ error: "Không tìm thấy học viên" });
+        }
+        await db.update(students)
+          .set({ hanetPersonId: pending.hanetPersonId })
+          .where(eq(students.id, targetStudent[0].id));
+        resolvedStudentId = targetStudent[0].id;
+      }
+
+      // Không bắt buộc classId phải nằm trong candidateClassIds đã gợi ý - nhân viên có thể
+      // chọn lớp khác nếu gợi ý không đúng, đây là điểm mạnh của việc để người xác nhận thay vì đoán.
+      if (req.dbUser.role === 'teacher') {
+        const allowed = await db.select({ id: classes.id }).from(classes)
+          .where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.id, parsedClassId)));
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Bạn không phụ trách lớp này" });
+        }
+      } else if (req.dbUser.role !== 'admin' && req.dbUser.branchId) {
+        const allowed = await db.select({ id: classes.id }).from(classes)
+          .where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parsedClassId)));
+        if (allowed.length === 0) {
+          return res.status(403).json({ error: "Lớp này không thuộc chi nhánh của bạn" });
+        }
+      }
+
+      const checkinTime = pending.checkinTime;
+      const startOfDay = new Date(checkinTime); startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(checkinTime); endOfDay.setHours(23, 59, 59, 999);
+      const finalStudentId = resolvedStudentId;
+
+      await db.transaction(async (tx) => {
+        await tx.update(attendance)
+          .set({ isDeleted: true, deletedAt: new Date() })
+          .where(and(
+            eq(attendance.tenantId, tenantId),
+            eq(attendance.studentId, finalStudentId),
+            eq(attendance.classId, parsedClassId),
+            eq(attendance.isDeleted, false),
+            gte(attendance.date, startOfDay),
+            lte(attendance.date, endOfDay)
+          ));
+
+        await tx.insert(attendance).values({
+          tenantId,
+          studentId: finalStudentId,
+          classId: parsedClassId,
+          date: checkinTime,
+          status: 'present',
+          note: 'Điểm danh qua camera Hanet (nhân viên xác nhận lớp thủ công)',
+        });
+
+        await tx.update(hanetPendingCheckins)
+          .set({
+            resolvedAt: new Date(),
+            resolvedClassId: parsedClassId,
+            resolvedBy: req.dbUser!.id,
+            studentId: finalStudentId,
+          })
+          .where(eq(hanetPendingCheckins.id, pendingId));
+      });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to resolve pending checkin" });
+    }
+  });
+
+  // Bỏ qua 1 dòng trong hàng chờ mà KHÔNG tạo điểm danh (ví dụ: nhận diện nhầm, khách vãng lai
+  // không phải học viên...). Không có cách này thì hàng chờ sẽ tồn đọng mãi những dòng không
+  // nên trở thành điểm danh, không có lối thoát nào để dọn hàng chờ.
+  app.put("/api/hanet-pending-checkins/:id/dismiss", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      if (!req.dbUser) {
+        return res.status(403).json({ error: "Không xác định được người dùng" });
+      }
+      const tenantId = req.dbUser.tenantId || req.user!.uid;
+      const pendingId = parseInt(req.params.id);
+
+      const result = await db.update(hanetPendingCheckins)
+        .set({ resolvedAt: new Date(), resolvedBy: req.dbUser.id })
+        .where(and(
+          eq(hanetPendingCheckins.id, pendingId),
+          eq(hanetPendingCheckins.tenantId, tenantId),
+          isNull(hanetPendingCheckins.resolvedAt)
+        ))
+        .returning();
+
+      if (result.length === 0) {
+        return res.status(404).json({ error: "Không tìm thấy hoặc đã được xử lý trước đó" });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to dismiss pending checkin" });
+    }
+  });
+
   // Mock Real-time Inventory API
   app.get("/api/inventory", (req, res) => {
     res.json({
