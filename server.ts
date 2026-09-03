@@ -1198,39 +1198,11 @@ async function startServer() {
       }
       const parsedClassId = parseInt(classId);
 
-      const pendingRows = await db.select().from(hanetPendingCheckins)
-        .where(and(eq(hanetPendingCheckins.id, pendingId), eq(hanetPendingCheckins.tenantId, tenantId)))
-        .limit(1);
-      if (pendingRows.length === 0) {
-        return res.status(404).json({ error: "Không tìm thấy check-in này" });
-      }
-      const pending = pendingRows[0];
-      if (pending.resolvedAt) {
-        return res.status(400).json({ error: "Check-in này đã được xử lý trước đó" });
-      }
-
-      let resolvedStudentId = pending.studentId;
-
-      // Trường hợp 'unlinked_face': hàng chờ chưa gắn học viên nào, nhân viên phải chọn học viên
-      // để liên kết lần đầu. Từ lần check-in sau, webhook sẽ tự khớp được luôn, không cần lặp lại bước này.
-      if (!resolvedStudentId) {
-        if (!studentId) {
-          return res.status(400).json({ error: "Cần chọn học viên để liên kết với khuôn mặt Hanet này" });
-        }
-        const targetStudent = await db.select().from(students)
-          .where(and(eq(students.id, parseInt(studentId)), eq(students.tenantId, tenantId), eq(students.isDeleted, false)))
-          .limit(1);
-        if (targetStudent.length === 0) {
-          return res.status(404).json({ error: "Không tìm thấy học viên" });
-        }
-        await db.update(students)
-          .set({ hanetPersonId: pending.hanetPersonId })
-          .where(eq(students.id, targetStudent[0].id));
-        resolvedStudentId = targetStudent[0].id;
-      }
-
-      // Không bắt buộc classId phải nằm trong candidateClassIds đã gợi ý - nhân viên có thể
-      // chọn lớp khác nếu gợi ý không đúng, đây là điểm mạnh của việc để người xác nhận thay vì đoán.
+      // Kiểm tra quyền với lớp được chọn NGAY TỪ ĐẦU - trước khi chạm vào bất kỳ dữ liệu nào
+      // khác, kể cả việc xác thực/liên kết học viên bên dưới. Trước đây bước liên kết học viên
+      // chạy TRƯỚC kiểm tra quyền này, nghĩa là 1 nhân viên chọn đúng học viên nhưng sai lớp
+      // (ngoài chi nhánh mình) vẫn khiến hệ thống ghi hanetPersonId cho học viên đó trước khi
+      // bị từ chối vì sai quyền lớp - đã sửa lại đúng thứ tự: không quyền thì không chạm gì cả.
       if (req.dbUser.role === 'teacher') {
         const allowed = await db.select({ id: classes.id }).from(classes)
           .where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.id, parsedClassId)));
@@ -1245,12 +1217,53 @@ async function startServer() {
         }
       }
 
+      const pendingRows = await db.select().from(hanetPendingCheckins)
+        .where(and(eq(hanetPendingCheckins.id, pendingId), eq(hanetPendingCheckins.tenantId, tenantId)))
+        .limit(1);
+      if (pendingRows.length === 0) {
+        return res.status(404).json({ error: "Không tìm thấy check-in này" });
+      }
+      const pending = pendingRows[0];
+      if (pending.resolvedAt) {
+        return res.status(400).json({ error: "Check-in này đã được xử lý trước đó" });
+      }
+
+      // Trường hợp 'unlinked_face': hàng chờ chưa gắn học viên nào - ở đây chỉ XÁC THỰC học
+      // viên có tồn tại (đọc, chưa ghi gì cả). Việc thực sự GHI hanetPersonId chuyển xuống
+      // trong transaction bên dưới, cùng lúc với tạo điểm danh - để không bao giờ xảy ra tình
+      // huống "đã lỡ liên kết khuôn mặt nhưng request lại thất bại vì lý do khác".
+      let resolvedStudentId = pending.studentId;
+      let studentIdToLink: number | null = null;
+
+      if (!resolvedStudentId) {
+        if (!studentId) {
+          return res.status(400).json({ error: "Cần chọn học viên để liên kết với khuôn mặt Hanet này" });
+        }
+        const targetStudent = await db.select().from(students)
+          .where(and(eq(students.id, parseInt(studentId)), eq(students.tenantId, tenantId), eq(students.isDeleted, false)))
+          .limit(1);
+        if (targetStudent.length === 0) {
+          return res.status(404).json({ error: "Không tìm thấy học viên" });
+        }
+        resolvedStudentId = targetStudent[0].id;
+        studentIdToLink = targetStudent[0].id;
+      }
+
+      const finalStudentId = resolvedStudentId;
       const checkinTime = pending.checkinTime;
       const startOfDay = new Date(checkinTime); startOfDay.setHours(0, 0, 0, 0);
       const endOfDay = new Date(checkinTime); endOfDay.setHours(23, 59, 59, 999);
-      const finalStudentId = resolvedStudentId;
 
+      // Toàn bộ phần GHI (liên kết khuôn mặt nếu cần + tạo điểm danh + đánh dấu đã xử lý) giờ
+      // nằm chung trong 1 transaction - hoặc tất cả cùng thành công, hoặc không có gì thay đổi
+      // nếu có bước nào lỗi giữa chừng.
       await db.transaction(async (tx) => {
+        if (studentIdToLink) {
+          await tx.update(students)
+            .set({ hanetPersonId: pending.hanetPersonId })
+            .where(eq(students.id, studentIdToLink));
+        }
+
         await tx.update(attendance)
           .set({ isDeleted: true, deletedAt: new Date() })
           .where(and(
