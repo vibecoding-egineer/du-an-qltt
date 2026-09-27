@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Plus, Building2, MapPin, Phone, Pencil, Save, Upload } from "lucide-react";
 import { auth } from "../lib/firebase";
+import { ShiftsManager } from "../components/ShiftsManager";
 
 interface Branch {
   id: number;
@@ -11,6 +12,7 @@ interface Branch {
 }
 
 export function Branches() {
+  const [activeTab, setActiveTab] = useState<'branches' | 'shifts'>('branches');
   const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -91,13 +93,43 @@ export function Branches() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900">Quản lý Cơ sở</h2>
-          <p className="mt-1 text-sm text-slate-500">
-            Quản lý thông tin các cơ sở của trung tâm.
-          </p>
-        </div>
+      <div>
+        <h2 className="text-2xl font-bold text-slate-900">Quản lý Cơ sở</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Quản lý thông tin cơ sở và các ca làm việc của trung tâm.
+        </p>
+      </div>
+
+      <div className="border-b border-slate-200">
+        <nav className="-mb-px flex gap-6">
+          <button
+            onClick={() => setActiveTab('branches')}
+            className={`border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+              activeTab === 'branches'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
+            }`}
+          >
+            Cơ sở
+          </button>
+          <button
+            onClick={() => setActiveTab('shifts')}
+            className={`border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
+              activeTab === 'shifts'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
+            }`}
+          >
+            Ca làm việc
+          </button>
+        </nav>
+      </div>
+
+      {activeTab === 'shifts' ? (
+        <ShiftsManager />
+      ) : (
+      <div className="space-y-6">
+      <div className="flex items-center justify-end">
         <button 
           onClick={() => {
             setEditingBranch(null);
@@ -155,6 +187,8 @@ export function Branches() {
           ))
         )}
       </div>
+      </div>
+      )}
 
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">

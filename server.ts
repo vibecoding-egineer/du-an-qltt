@@ -7,7 +7,7 @@ import { requireRole, requirePermission } from "./src/middleware/rbac.js";
 import { getOrCreateUser } from "./src/db/users.js";
 import { db } from "./src/db/index.js";
 import { insertReturning, updateReturning } from "./src/db/helpers.js";
-import { branches, classes, students, users, attendance, settings, transactions, promotions, classEnrollments, attendanceSessions, hanetPendingCheckins, licenses } from "./src/db/schema.js";
+import { branches, classes, students, users, attendance, settings, transactions, promotions, classEnrollments, attendanceSessions, hanetPendingCheckins, licenses, shifts, classSchedules, staffShifts, staffAttendance } from "./src/db/schema.js";
 import { eq, and, or, like, desc, gte, lte, inArray, sql, isNull } from "drizzle-orm";
 import { getAuth } from "firebase-admin/auth";
 import { verifyHanetHash, parseHanetTime, HANET_RECOGNIZED_PERSON_TYPES, type HanetWebhookPayload } from "./src/lib/hanet.js";
@@ -529,6 +529,161 @@ async function startServer() {
     } catch (error: any) {
       console.error(error);
       res.status(500).json({ error: "Failed to update branch" });
+    }
+  });
+
+  // ===== Ca làm việc =====
+  // Ca chỉ là khung giờ có tên, dùng lại cho cả thời khóa biểu lớp lẫn phân ca nhân viên.
+  //
+  // Phân quyền: đọc thì ai đăng nhập cũng được (giáo viên cần xem lịch, nhân viên cần xem
+  // ca của mình). Ghi thì chỉ admin, hoặc người được admin cấp quyền '/shifts' riêng.
+
+  /** Chuẩn hoá giờ về dạng HH:MM:SS để lưu và so sánh nhất quán. Trả null nếu sai định dạng. */
+  const normalizeShiftTime = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const match = value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    const second = match[3] ? Number(match[3]) : 0;
+    if (hour > 23 || minute > 59 || second > 59) return null;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(hour)}:${pad(minute)}:${pad(second)}`;
+  };
+
+  app.get("/api/shifts", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const tenantId = req.dbUser?.tenantId || req.user!.uid;
+      const result = await db.select().from(shifts)
+        .where(and(eq(shifts.tenantId, tenantId), eq(shifts.isDeleted, false)))
+        .orderBy(shifts.startTime);
+      res.json(result);
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to fetch shifts" });
+    }
+  });
+
+  app.post("/api/shifts", requireAuth, requirePermission('/shifts'), async (req: AuthRequest, res) => {
+    try {
+      const tenantId = req.dbUser?.tenantId || req.user!.uid;
+      const { name, startTime, endTime, isAdministrative } = req.body;
+
+      if (!name || typeof name !== 'string' || !name.trim()) {
+        return res.status(400).json({ error: "Vui lòng nhập tên ca." });
+      }
+      const start = normalizeShiftTime(startTime);
+      const end = normalizeShiftTime(endTime);
+      if (!start || !end) {
+        return res.status(400).json({ error: "Giờ không hợp lệ. Định dạng đúng là HH:MM." });
+      }
+      // Chưa hỗ trợ ca qua đêm (ví dụ 22:00 - 06:00). Nếu về sau trung tâm cần, phải thêm
+      // cờ đánh dấu ca qua đêm rồi sửa cả phần tính giờ công, không chỉ bỏ điều kiện này.
+      if (end <= start) {
+        return res.status(400).json({ error: "Giờ kết thúc phải sau giờ bắt đầu." });
+      }
+
+      const result = await insertReturning(db, shifts, {
+        tenantId,
+        name: name.trim(),
+        startTime: start,
+        endTime: end,
+        isAdministrative: !!isAdministrative,
+      });
+      res.json(result);
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to create shift" });
+    }
+  });
+
+  app.put("/api/shifts/:id", requireAuth, requirePermission('/shifts'), async (req: AuthRequest, res) => {
+    try {
+      const tenantId = req.dbUser?.tenantId || req.user!.uid;
+      const shiftId = parseInt(req.params.id);
+      const { name, startTime, endTime, isAdministrative } = req.body;
+
+      if (!name || typeof name !== 'string' || !name.trim()) {
+        return res.status(400).json({ error: "Vui lòng nhập tên ca." });
+      }
+      const start = normalizeShiftTime(startTime);
+      const end = normalizeShiftTime(endTime);
+      if (!start || !end) {
+        return res.status(400).json({ error: "Giờ không hợp lệ. Định dạng đúng là HH:MM." });
+      }
+      if (end <= start) {
+        return res.status(400).json({ error: "Giờ kết thúc phải sau giờ bắt đầu." });
+      }
+
+      const result = await updateReturning(
+        db,
+        shifts,
+        {
+          name: name.trim(),
+          startTime: start,
+          endTime: end,
+          isAdministrative: !!isAdministrative,
+        },
+        and(eq(shifts.id, shiftId), eq(shifts.tenantId, tenantId), eq(shifts.isDeleted, false)),
+      );
+
+      if (result.length === 0) {
+        return res.status(404).json({ error: "Không tìm thấy ca làm việc." });
+      }
+      res.json(result[0]);
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to update shift" });
+    }
+  });
+
+  app.delete("/api/shifts/:id", requireAuth, requirePermission('/shifts'), async (req: AuthRequest, res) => {
+    try {
+      const tenantId = req.dbUser?.tenantId || req.user!.uid;
+      const shiftId = parseInt(req.params.id);
+
+      // CHẶN XÓA KHI CA ĐANG ĐƯỢC DÙNG. Xóa ca đang gắn với lịch học hoặc bảng công sẽ
+      // làm những bản ghi đó trỏ tới một ca không còn tồn tại: lịch lớp mất giờ học, và
+      // con số "đi muộn 15 phút" trong bảng công mất mốc đối chiếu.
+      // Báo rõ đang vướng ở đâu để người dùng biết phải gỡ gì trước, thay vì chỉ từ chối.
+      const [usedInClasses, usedInRoster, usedInTimesheet] = await Promise.all([
+        db.select({ id: classSchedules.id }).from(classSchedules)
+          .where(and(eq(classSchedules.shiftId, shiftId), eq(classSchedules.isDeleted, false))),
+        db.select({ id: staffShifts.id }).from(staffShifts)
+          .where(and(eq(staffShifts.shiftId, shiftId), eq(staffShifts.isDeleted, false))),
+        db.select({ id: staffAttendance.id }).from(staffAttendance)
+          .where(and(eq(staffAttendance.shiftId, shiftId), eq(staffAttendance.isDeleted, false))),
+      ]);
+
+      if (usedInClasses.length > 0 || usedInRoster.length > 0 || usedInTimesheet.length > 0) {
+        const reasons: string[] = [];
+        if (usedInClasses.length > 0) reasons.push(`${usedInClasses.length} lịch học`);
+        if (usedInRoster.length > 0) reasons.push(`${usedInRoster.length} lượt phân ca nhân viên`);
+        if (usedInTimesheet.length > 0) reasons.push(`${usedInTimesheet.length} bản ghi chấm công`);
+        return res.status(400).json({
+          error: `Không thể xóa vì ca này đang được dùng ở ${reasons.join(', ')}. Vui lòng gỡ khỏi những chỗ đó trước.`,
+          usage: {
+            classSchedules: usedInClasses.length,
+            staffShifts: usedInRoster.length,
+            staffAttendance: usedInTimesheet.length,
+          },
+        });
+      }
+
+      const result = await updateReturning(
+        db,
+        shifts,
+        { isDeleted: true, deletedAt: new Date() },
+        and(eq(shifts.id, shiftId), eq(shifts.tenantId, tenantId), eq(shifts.isDeleted, false)),
+      );
+
+      if (result.length === 0) {
+        return res.status(404).json({ error: "Không tìm thấy ca làm việc." });
+      }
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to delete shift" });
     }
   });
 
