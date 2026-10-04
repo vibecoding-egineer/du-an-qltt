@@ -13,6 +13,7 @@ import { Branches } from "./pages/Branches";
 import { Classes } from "./pages/Classes";
 import { Students } from "./pages/Students";
 import { Attendance } from "./pages/Attendance";
+import { Schedule } from "./pages/Schedule";
 import { HanetQueue } from "./pages/HanetQueue";
 import { Finance } from "./pages/Finance";
 import { Promotions } from "./pages/Promotions";
@@ -21,6 +22,9 @@ import { Onboarding } from "./pages/Onboarding";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { SettingsProvider } from "./contexts/SettingsContext";
 import { navigation } from "./components/Sidebar";
+import { Shifts } from "./pages/Shifts";
+import { StaffShifts } from "./pages/StaffShifts";
+import { StaffAttendance } from "./pages/StaffAttendance";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, dbUser, loading, needsOnboarding, refreshDbUser } = useAuth();
@@ -86,10 +90,17 @@ export default function App() {
               <Route index element={<Dashboard />} />
               <Route path="inventory" element={<Inventory />} />
               <Route path="hr" element={<Employees />} />
+
+
+              <Route path="staff-shifts" element={<StaffShifts />} />          
+              <Route path="staff-attendance" element={<StaffAttendance />} />    
+
               <Route path="settings" element={<Branches />} />
+              <Route path="shifts" element={<Shifts />} />  
               <Route path="classes" element={<Classes />} />
               <Route path="students" element={<Students />} />
               <Route path="attendance" element={<Attendance />} />
+              <Route path="schedule" element={<Schedule />} />
               <Route path="hanet-checkins" element={<HanetQueue />} />
               <Route path="finance" element={<Finance />} />
               <Route path="promotions" element={<Promotions />} />

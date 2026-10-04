@@ -511,7 +511,7 @@ export const staffAttendance = mysqlTable('staff_attendance', {
 
   // Mỗi nhân viên mỗi ngày chỉ một bản ghi công đang hiệu lực.
   activeAttendanceKey: varchar('active_attendance_key', { length: 64 })
-    .generatedAlwaysAs(sql`(CASE WHEN is_deleted = 0 THEN CONCAT(user_id, '-', work_date) ELSE NULL END)`, { mode: 'stored' }),
+  .generatedAlwaysAs(sql`(CASE WHEN is_deleted = 0 THEN CONCAT(user_id, '-', work_date, '-', COALESCE(shift_id, 0)) ELSE NULL END)`, { mode: 'stored' }),
 }, (table) => [
   index('staff_attendance_tenant_id_idx').on(table.tenantId),
   index('staff_attendance_user_id_idx').on(table.userId),

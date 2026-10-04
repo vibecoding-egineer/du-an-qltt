@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Plus, GraduationCap, Search, Trash2 } from "lucide-react";
 import { auth } from "../lib/firebase";
+import { ClassScheduleEditor } from "../components/ClassScheduleEditor";
 import { useAuth } from "../contexts/AuthContext";
 
 interface ClassData {
@@ -475,6 +476,11 @@ export function Classes() {
                   className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed"
                 />
               </div>
+              {/* Thời khóa biểu chỉ hiện ở form SỬA, không có ở form tạo mới - vì lúc tạo
+                  lớp chưa tồn tại nên chưa có ID để gắn lịch vào. Tạo lớp xong, mở sửa
+                  là xếp lịch được ngay. */}
+              <ClassScheduleEditor classId={editingClass.id} />
+
               <div className="flex justify-between pt-4">
                 {(dbUser?.role === 'admin' || dbUser?.role === 'manager') && (
                   <button

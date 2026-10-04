@@ -12,8 +12,12 @@ import {
   BarChart3,
   Menu,
   ClipboardCheck,
+  CalendarDays,
   Inbox,
   Percent,
+  Clock,
+  CalendarClock,       
+  ClipboardList, 
 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useAuth } from "../contexts/AuthContext";
@@ -26,11 +30,14 @@ export const navigation = [
   { name: "Quản lý ưu đãi", href: "/promotions", icon: Percent, roles: ["admin"] },
   { name: "Quản lý lớp học", href: "/classes", icon: GraduationCap, roles: ['admin', 'manager', 'staff', 'teacher'] },
   { name: "Quản lý học viên", href: "/students", icon: Users, roles: ['admin', 'manager', 'staff', 'teacher'] },
+  { name: "Thời khóa biểu", href: "/schedule", icon: CalendarDays, roles: ['admin', 'manager', 'staff', 'teacher'] },
   { name: "Điểm danh", href: "/attendance", icon: ClipboardCheck, roles: ['admin', 'manager', 'staff', 'teacher'] },
   { name: "Check-in chờ xử lý", href: "/hanet-checkins", icon: Inbox, roles: ['admin', 'manager', 'staff', 'teacher'] },
   { name: "Chăm sóc KH (Zalo)", href: "/customer-care", icon: MessageCircle, roles: ['admin', 'manager', 'staff'] },
   { name: "Quản lý thu chi", href: "/finance", icon: Wallet, roles: ['admin', 'manager', 'staff'] },
   { name: "Quản lý nhân viên", href: "/hr", icon: Briefcase, roles: ['admin'] },
+  { name: "Xếp ca", href: "/staff-shifts", icon: CalendarClock, roles: ['admin', 'manager', 'staff', 'teacher'] },       
+  { name: "Bảng công", href: "/staff-attendance", icon: ClipboardList, roles: ['admin', 'manager', 'staff', 'teacher'] },  
   { name: "Quản lý kho", href: "/inventory", icon: Box, roles: ['admin', 'manager'] },
   { name: "Báo cáo", href: "/reports", icon: BarChart3, roles: ['admin', 'manager'] },
 ];

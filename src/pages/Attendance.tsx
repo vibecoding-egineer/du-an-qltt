@@ -12,6 +12,14 @@ interface ClassData {
   id: number;
   name: string;
   branchId: number;
+  teacherId: number | null;
+}
+
+interface StaffOption {
+  id: number;
+  name: string | null;
+  email: string;
+  role: string | null;
 }
 
 interface AttendanceRecord {
@@ -51,6 +59,10 @@ export function Attendance() {
   const [sessionError, setSessionError] = useState("");
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
+  // --- Ghi nhận giáo viên đứng lớp ---
+  const [staffOptions, setStaffOptions] = useState<StaffOption[]>([]);
+  const [taughtBy, setTaughtBy] = useState<number | "">("");
+
   // Ghi nhớ những học viên mà người dùng đã tự chỉnh nhưng CHƯA lưu.
   // Khi tự làm mới, dữ liệu từ máy chủ sẽ KHÔNG ghi đè lên các ô này - nếu không, giáo viên
   // đang sửa dở mà đúng lúc làm mới thì công sức nhập tay bị mất trắng.
@@ -85,6 +97,19 @@ export function Attendance() {
    * @param silent true = làm mới ngầm (không hiện vòng xoay, giữ nguyên các ô người dùng
    *               đang sửa dở). Dùng cho việc tự làm mới khi phiên camera đang mở.
    */
+  /** Danh sách nhân sự để chọn người đứng lớp. Tải một lần, dùng lại cho mọi lớp. */
+  const fetchStaff = useCallback(async () => {
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch("/api/users", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) setStaffOptions(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
   const fetchStudentsAndAttendance = useCallback(async (classId: number, date: string, silent = false) => {
     if (!silent) setLoading(true);
     try {
@@ -147,17 +172,23 @@ export function Attendance() {
 
   useEffect(() => {
     fetchClasses();
-  }, []);
+    fetchStaff();
+  }, [fetchStaff]);
 
   useEffect(() => {
     if (selectedClass) {
+      // Điền sẵn giáo viên phụ trách của lớp. Người dùng đổi được khi có dạy thay -
+      // đây chỉ là gợi ý mặc định cho trường hợp thường gặp nhất.
+      const cls = classes.find(c => c.id === selectedClass);
+      setTaughtBy(cls?.teacherId ?? "");
+
       // Đổi lớp hoặc đổi ngày -> dữ liệu đang sửa dở không còn liên quan nữa.
       unsavedStudentIds.current.clear();
       setLastRefreshedAt(null);
       fetchStudentsAndAttendance(selectedClass, attendanceDate);
       fetchActiveSession(selectedClass);
     }
-  }, [selectedClass, attendanceDate, fetchStudentsAndAttendance, fetchActiveSession]);
+  }, [selectedClass, attendanceDate, classes, fetchStudentsAndAttendance, fetchActiveSession]);
 
   // Tự làm mới khi phiên camera đang mở, để học viên quét mặt xong là hiện lên dần.
   // Chỉ chạy khi đang xem ngày hôm nay - xem lại ngày cũ thì không có gì để cập nhật.
@@ -186,7 +217,7 @@ export function Attendance() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({ classId: selectedClass })
+        body: JSON.stringify({ classId: selectedClass, taughtBy: taughtBy || null })
       });
       const data = await res.json();
       if (res.ok) {
@@ -298,6 +329,29 @@ export function Attendance() {
       );
       
       await Promise.all(promises);
+
+      // Ghi nhận buổi dạy. Gọi MỘT lần sau khi lưu xong, không gọi trong vòng lặp từng
+      // học viên - nếu gọi lặp thì nhiều request đồng thời có thể cùng thấy "chưa có bản ghi"
+      // rồi cùng tạo, sinh ra bản ghi trùng cho cùng một buổi.
+      // Máy chủ tạo bản ghi ở trạng thái ĐÃ ĐÓNG nên không ảnh hưởng tới điểm danh camera.
+      // Lỗi ở bước này không làm hỏng việc lưu điểm danh (đã xong ở trên), nên chỉ ghi log.
+      try {
+        await fetch("/api/attendance-sessions/manual", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            classId: selectedClass,
+            date: attendanceDate,
+            taughtBy: taughtBy || null,
+          })
+        });
+      } catch (err) {
+        console.error("Không ghi nhận được buổi dạy:", err);
+      }
+
       // Đã lưu xong -> dữ liệu trên máy chủ khớp với màn hình, không còn gì cần bảo vệ
       // khỏi việc ghi đè nữa.
       unsavedStudentIds.current.clear();
@@ -341,6 +395,26 @@ export function Attendance() {
             </select>
           )}
           
+          {/* Giáo viên đứng lớp buổi này. Điền sẵn giáo viên phụ trách, đổi được khi có
+              dạy thay. Giá trị này được ghi lại cả khi mở phiên camera lẫn khi lưu điểm
+              danh tay, nên lớp nào cũng có dữ liệu ai dạy buổi nào. */}
+          {selectedClass && (
+            <div className="flex items-center gap-2">
+              <label className="whitespace-nowrap text-sm text-slate-600">Giáo viên dạy:</label>
+              <select
+                value={taughtBy}
+                onChange={(e) => setTaughtBy(e.target.value ? parseInt(e.target.value) : "")}
+                title="Người thực tế đứng lớp buổi này"
+                className="rounded-md border-0 py-1.5 pl-3 pr-8 text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm"
+              >
+                <option value="">-- Chưa xác định --</option>
+                {staffOptions.map(s => (
+                  <option key={s.id} value={s.id}>{s.name || s.email}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Điểm danh bằng camera Hanet: mở phiên để hệ thống biết check-in thuộc lớp nào.
               Chỉ cho thao tác khi đang xem ngày hôm nay - mở phiên cho ngày quá khứ là vô nghĩa. */}
           {selectedClass && isViewingToday && (
