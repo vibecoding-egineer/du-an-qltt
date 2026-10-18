@@ -1,166 +1,340 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { Users, GraduationCap, DollarSign, Wallet, Clock, Loader2 } from "lucide-react";
-import { useAuth } from "../contexts/AuthContext";
-import { auth } from "../lib/firebase";
-import { toShortTime } from "../components/ClassScheduleEditor";
+/**
+ * Dashboard — Module Hub
+ *
+ * Trang chủ hiển thị 5 module lớn dạng card grid.
+ * Click vào card → chuyển đến trang module (dùng ModulePage.tsx).
+ *
+ * Hiệu ứng:
+ * - Header: fade-in + slide-down
+ * - Cards: staggered fade-in từ dưới lên (delay 100ms/card)
+ * - Hover: scale(1.02) + translate-y(-4px) + shadow-xl
+ * - Click: scale(0.98) press effect
+ * - Gradient bar trên mỗi card theo màu module
+ *
+ * RBAC:
+ * - admin: thấy tất cả module
+ * - Có permissions: thấy module nếu có ≥1 route con trong permissions
+ * - Không permissions: fallback theo roles
+ */
 
-interface ScheduleEntry {
-  id: number;
-  classId: number;
-  className: string;
-  shiftName: string;
-  startTime: string;
-  endTime: string;
-  dayOfWeek: number;
+import React, { useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  Settings,
+  GraduationCap,
+  MessageCircle,
+  Wallet,
+  BarChart3,
+  ChevronRight,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { cn } from "../lib/utils";
+import { useAuth } from "../contexts/AuthContext";
+import type { AccentColor } from "../components/ModulePage";
+
+/* ══════════════════════════════════════════════════════════
+   Types
+   ══════════════════════════════════════════════════════════ */
+
+interface ModuleCardConfig {
+  /** Tên module hiển thị trên card */
+  title: string;
+  /** Mô tả ngắn bên dưới tiêu đề */
+  description: string;
+  /** Icon đại diện module */
+  icon: LucideIcon;
+  /** Màu chủ đạo — quyết định gradient bar, icon color */
+  accentColor: AccentColor;
+  /** Route khi click vào card — VD: "/setup" */
+  route: string;
+  /** Roles được phép thấy module này (fallback khi không có permissions) */
+  roles: string[];
+  /** Danh sách route con thuộc module — dùng kiểm tra permission-based access */
+  memberRoutes: string[];
+  /** Tổng số tính năng trong module */
+  featureCount: number;
+  /** Số tính năng đã triển khai */
+  activeCount: number;
 }
 
-type ClassStatus = "done" | "ongoing" | "upcoming";
+/* ══════════════════════════════════════════════════════════
+   Tailwind JIT-safe color map
+   ══════════════════════════════════════════════════════════ */
 
-const STATUS_STYLE: Record<ClassStatus, { label: string; tone: string }> = {
-  ongoing: { label: "Đang học", tone: "bg-green-50 text-green-800 ring-green-600/20" },
-  upcoming: { label: "Sắp tới", tone: "bg-blue-50 text-blue-800 ring-blue-600/20" },
-  done: { label: "Đã xong", tone: "bg-slate-100 text-slate-500 ring-slate-500/20" },
+const MODULE_STYLES: Record<
+  AccentColor,
+  { iconBg: string; iconText: string; gradient: string }
+> = {
+  blue: {
+    iconBg: "bg-blue-100",
+    iconText: "text-blue-600",
+    gradient: "from-blue-500 to-blue-600",
+  },
+  indigo: {
+    iconBg: "bg-indigo-100",
+    iconText: "text-indigo-600",
+    gradient: "from-indigo-500 to-indigo-600",
+  },
+  emerald: {
+    iconBg: "bg-emerald-100",
+    iconText: "text-emerald-600",
+    gradient: "from-emerald-500 to-emerald-600",
+  },
+  amber: {
+    iconBg: "bg-amber-100",
+    iconText: "text-amber-600",
+    gradient: "from-amber-500 to-amber-600",
+  },
+  rose: {
+    iconBg: "bg-rose-100",
+    iconText: "text-rose-600",
+    gradient: "from-rose-500 to-rose-600",
+  },
 };
 
+/* ══════════════════════════════════════════════════════════
+   Module definitions
+   ══════════════════════════════════════════════════════════ */
+
+const MODULE_CARDS: ModuleCardConfig[] = [
+  {
+    title: "Thiết lập",
+    description: "Khởi tạo & cài đặt cơ sở, ca học, lớp học, ưu đãi",
+    icon: Settings,
+    accentColor: "blue",
+    route: "/setup",
+    roles: ["admin", "manager", "staff", "teacher"],
+    memberRoutes: ["/settings", "/promotions", "/classes", "/settings/appearance", "/settings/camera"],
+    featureCount: 10,
+    activeCount: 5,
+  },
+  {
+    title: "Vận hành lớp học",
+    description: "Quản lý học viên, thời khóa biểu, điểm danh, check-in",
+    icon: GraduationCap,
+    accentColor: "indigo",
+    route: "/operations",
+    roles: ["admin", "manager", "staff", "teacher"],
+    memberRoutes: ["/students", "/schedule", "/attendance", "/hanet-checkins"],
+    featureCount: 6,
+    activeCount: 4,
+  },
+  {
+    title: "Chăm sóc khách hàng",
+    description: "Tư vấn, chăm sóc & giữ chân học viên qua Zalo, tin nhắn",
+    icon: MessageCircle,
+    accentColor: "emerald",
+    route: "/customer-care",
+    roles: ["admin", "manager", "staff"],
+    memberRoutes: [],
+    featureCount: 5,
+    activeCount: 0,
+  },
+  {
+    title: "Kế toán – Nhân sự",
+    description: "Thu chi, kho hàng, quản lý nhân viên, xếp ca & bảng công",
+    icon: Wallet,
+    accentColor: "amber",
+    route: "/accounting",
+    roles: ["admin", "manager", "staff", "teacher"],
+    memberRoutes: [
+      "/shifts",
+      "/finance",
+      "/hr",
+      "/staff-shifts",
+      "/staff-attendance",
+      "/inventory",
+    ],
+    featureCount: 8,
+    activeCount: 6,
+  },
+  {
+    title: "Giám đốc trung tâm",
+    description: "Báo cáo tổng hợp, phân tích dữ liệu & ra quyết định",
+    icon: BarChart3,
+    accentColor: "rose",
+    route: "/director",
+    roles: ["admin", "manager"],
+    memberRoutes: [],
+    featureCount: 5,
+    activeCount: 0,
+  },
+];
+
+/* ══════════════════════════════════════════════════════════
+   Helpers
+   ══════════════════════════════════════════════════════════ */
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Chào buổi sáng";
+  if (hour < 18) return "Chào buổi chiều";
+  return "Chào buổi tối";
+}
+
+/* ══════════════════════════════════════════════════════════
+   CSS keyframes
+   ══════════════════════════════════════════════════════════ */
+
+const KEYFRAMES = `
+@keyframes dashboardHeaderEnter {
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.dashboard-header-animate {
+  opacity: 0;
+  animation: dashboardHeaderEnter 0.4s ease-out forwards;
+}
+
+@keyframes dashboardCardEnter {
+  from { opacity: 0; transform: translateY(24px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.dashboard-card-animate {
+  opacity: 0;
+  animation: dashboardCardEnter 0.45s ease-out forwards;
+}
+`;
+
+/* ══════════════════════════════════════════════════════════
+   Dashboard (Module Hub)
+   ══════════════════════════════════════════════════════════ */
+
 export function Dashboard() {
+  const navigate = useNavigate();
   const { dbUser } = useAuth();
 
-  const [todayClasses, setTodayClasses] = useState<ScheduleEntry[]>([]);
-  const [loadingSchedule, setLoadingSchedule] = useState(true);
-  // Cập nhật mỗi phút để trạng thái "đang học / sắp tới" không đứng yên khi người dùng mở
-  // màn hình lâu. Chỉ tính lại từ dữ liệu đã có, không gọi lại máy chủ.
-  const [now, setNow] = useState(new Date());
+  const userRole = dbUser?.role || "staff";
+  const displayName = dbUser?.name || "";
 
-  const stats = [
-    { name: "Học viên đang học", value: "1,240", icon: Users, color: "text-blue-600", bg: "bg-blue-100", show: true },
-    { name: "Lớp đang hoạt động", value: "86", icon: GraduationCap, color: "text-indigo-600", bg: "bg-indigo-100", show: true },
-    { name: "Doanh thu tháng (VNĐ)", value: "450M", icon: DollarSign, color: "text-green-600", bg: "bg-green-100", show: dbUser?.role === 'admin' || dbUser?.role === 'manager' },
-    { name: "Chưa thu (VNĐ)", value: "24M", icon: Wallet, color: "text-red-600", bg: "bg-red-100", show: dbUser?.role === 'admin' || dbUser?.role === 'manager' },
-  ].filter(s => s.show);
-
-  const fetchTodaySchedule = useCallback(async () => {
-    setLoadingSchedule(true);
-    try {
-      const token = await auth.currentUser?.getIdToken();
-      const res = await fetch("/api/class-schedules", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const all: ScheduleEntry[] = await res.json();
-        // getDay() trả 0 cho Chủ nhật, còn hệ thống quy ước 7 - phải quy đổi, nếu không
-        // mỗi Chủ nhật sẽ hiện nhầm lịch của Thứ 2.
-        const jsDay = new Date().getDay();
-        const todayValue = jsDay === 0 ? 7 : jsDay;
-        setTodayClasses(
-          all
-            .filter((e) => e.dayOfWeek === todayValue)
-            .sort((a, b) => a.startTime.localeCompare(b.startTime))
+  /**
+   * Lọc module theo quyền — cùng pattern với Sidebar/App:
+   * 1. admin → thấy tất cả
+   * 2. Có permissions → thấy module nếu ít nhất 1 route con nằm trong permissions
+   * 3. Không permissions → fallback theo roles của module
+   */
+  const visibleModules = useMemo(() => {
+    return MODULE_CARDS.filter((mod) => {
+      if (userRole === "admin") return true;
+      if (dbUser?.permissions) {
+        return mod.memberRoutes.some((route) =>
+          dbUser.permissions.includes(route),
         );
       }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoadingSchedule(false);
-    }
-  }, []);
+      return mod.roles.includes(userRole);
+    });
+  }, [userRole, dbUser?.permissions]);
 
-  useEffect(() => {
-    fetchTodaySchedule();
-  }, [fetchTodaySchedule]);
+  const greeting = displayName
+    ? `${getGreeting()}, ${displayName}!`
+    : `${getGreeting()}!`;
 
-  useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 60000);
-    return () => clearInterval(timer);
-  }, []);
+  return (
+    <>
+      <style>{KEYFRAMES}</style>
 
-  const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:00`;
+      <div className="space-y-8">
+        {/* ── Header ── */}
+        <div className="dashboard-header-animate">
+          <h2 className="text-2xl font-bold text-slate-900">{greeting}</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Chọn module để bắt đầu làm việc
+          </p>
+        </div>
 
-  const statusOf = (entry: ScheduleEntry): ClassStatus => {
-    if (currentTime >= entry.endTime) return "done";
-    if (currentTime >= entry.startTime) return "ongoing";
-    return "upcoming";
+        {/* ── Module grid ── */}
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {visibleModules.map((mod, index) => (
+            <ModuleHubCard
+              key={mod.route}
+              config={mod}
+              index={index}
+              onNavigate={navigate}
+            />
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   ModuleHubCard (component nội bộ)
+   ══════════════════════════════════════════════════════════ */
+
+interface ModuleHubCardProps {
+  config: ModuleCardConfig;
+  /** Thứ tự card — quyết định animation-delay */
+  index: number;
+  onNavigate: (path: string) => void;
+}
+
+function ModuleHubCard({ config, index, onNavigate }: ModuleHubCardProps) {
+  const {
+    title,
+    description,
+    icon: ModuleIcon,
+    accentColor,
+    route,
+    featureCount,
+    activeCount,
+  } = config;
+
+  const style = MODULE_STYLES[accentColor];
+
+  const handleClick = () => {
+    onNavigate(route);
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900">
-          {dbUser?.role === 'admin' ? 'Tổng quan Toàn Hệ Thống' : 'Tổng quan Hoạt Động'}
-        </h2>
-        <p className="mt-1 text-sm text-slate-500">Xem nhanh các chỉ số hoạt động trong tháng.</p>
+    <button
+      onClick={handleClick}
+      className={cn(
+        "dashboard-card-animate",
+        "group relative overflow-hidden rounded-2xl bg-white p-6 text-left",
+        "shadow-sm ring-1 ring-slate-200",
+        "transition-all duration-300",
+        "hover:shadow-xl hover:scale-[1.02] hover:-translate-y-1",
+        "active:scale-[0.98]",
+        "cursor-pointer",
+      )}
+      style={{ animationDelay: `${index * 100}ms` }}
+    >
+      {/* Gradient accent bar — thanh màu trên cùng */}
+      <div
+        className={cn(
+          "absolute inset-x-0 top-0 h-1 bg-gradient-to-r",
+          style.gradient,
+        )}
+      />
+
+      {/* Icon */}
+      <div
+        className={cn(
+          "mb-4 flex h-14 w-14 items-center justify-center rounded-xl transition-transform duration-300 group-hover:scale-110",
+          style.iconBg,
+        )}
+      >
+        <ModuleIcon className={cn("h-7 w-7", style.iconText)} />
       </div>
 
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-        {stats.map((stat) => (
-          <div key={stat.name} className="overflow-hidden rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <div className="flex items-center gap-4">
-              <div className={`flex h-12 w-12 items-center justify-center rounded-lg ${stat.bg}`}>
-                <stat.icon className={`h-6 w-6 ${stat.color}`} />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-slate-500">{stat.name}</p>
-                <p className="text-2xl font-bold text-slate-900">{stat.value}</p>
-              </div>
-            </div>
-          </div>
-        ))}
+      {/* Title */}
+      <h3 className="text-lg font-bold text-slate-900 transition-colors group-hover:text-slate-700">
+        {title}
+      </h3>
+
+      {/* Description */}
+      <p className="mt-1.5 text-sm leading-relaxed text-slate-500">
+        {description}
+      </p>
+
+      {/* Footer: feature count + chevron */}
+      <div className="mt-5 flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-400">
+          {activeCount}/{featureCount} tính năng
+        </span>
+        <ChevronRight className="h-4 w-4 text-slate-300 transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-slate-500" />
       </div>
-
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <h3 className="text-lg font-semibold text-slate-900">Lớp học hôm nay</h3>
-
-          {loadingSchedule ? (
-            <div className="mt-4 flex h-64 items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 text-sm text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Đang tải...
-            </div>
-          ) : todayClasses.length === 0 ? (
-            <div className="mt-4 flex h-64 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-6 text-center">
-              <Clock className="h-8 w-8 text-slate-300" />
-              <span className="text-sm text-slate-500">Hôm nay không có lớp nào theo thời khóa biểu</span>
-              <span className="text-xs text-slate-400">
-                Xếp lịch tại Quản lý lớp học → mở lớp → Thời khóa biểu
-              </span>
-            </div>
-          ) : (
-            <ul className="mt-4 max-h-64 space-y-2 overflow-y-auto">
-              {todayClasses.map((entry) => {
-                const status = statusOf(entry);
-                const style = STATUS_STYLE[status];
-                return (
-                  <li
-                    key={entry.id}
-                    className={`flex items-center gap-3 rounded-lg px-3 py-2.5 ring-1 ring-inset ring-slate-200 ${
-                      status === "done" ? "bg-slate-50" : "bg-white"
-                    }`}
-                  >
-                    <div className="w-24 flex-shrink-0 text-sm font-medium text-slate-700">
-                      {toShortTime(entry.startTime)}–{toShortTime(entry.endTime)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className={`truncate text-sm font-medium ${status === "done" ? "text-slate-500" : "text-slate-900"}`}>
-                        {entry.className}
-                      </div>
-                      <div className="truncate text-xs text-slate-400">{entry.shiftName}</div>
-                    </div>
-                    <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${style.tone}`}>
-                      {style.label}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-
-        <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <h3 className="text-lg font-semibold text-slate-900">Hoạt động gần đây</h3>
-          <div className="mt-4 flex h-64 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50">
-            <span className="text-sm text-slate-500">Chưa có hoạt động</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    </button>
   );
 }

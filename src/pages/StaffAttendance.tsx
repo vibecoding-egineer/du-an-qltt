@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ClipboardList,
+  Download,
   Edit,
   Loader2,
   Plus,
@@ -11,6 +12,7 @@ import {
 } from "lucide-react";
 import { auth } from "../lib/firebase";
 import { useAuth } from "../contexts/AuthContext";
+import * as XLSX from "xlsx";
 
 interface AttendanceRecord {
   id: number;
@@ -52,13 +54,27 @@ const formatHM = (dt: string | null): string => {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
 
+const getDayOfWeek = (dateStr: string) => {
+  const d = new Date(dateStr + "T00:00:00");
+  return WEEKDAY_SHORT[d.getDay()];
+};
+
+/** Tính số giờ làm từ checkIn → checkOut. */
+const computeHours = (checkIn: string | null, checkOut: string | null): string => {
+  if (!checkIn || !checkOut) return "";
+  const diff = new Date(checkOut).getTime() - new Date(checkIn).getTime();
+  if (diff <= 0) return "";
+  const hours = Math.floor(diff / 3600000);
+  const mins = Math.round((diff % 3600000) / 60000);
+  return `${hours}h${mins > 0 ? String(mins).padStart(2, "0") : "00"}`;
+};
+
 export function StaffAttendance() {
   const { dbUser } = useAuth();
   const canEdit = dbUser?.role === "admin" || dbUser?.role === "manager";
 
-  // Tháng hiện tại
   const [year, setYear] = useState(() => new Date().getFullYear());
-  const [month, setMonth] = useState(() => new Date().getMonth() + 1); // 1-12
+  const [month, setMonth] = useState(() => new Date().getMonth() + 1);
 
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [allShifts, setAllShifts] = useState<Shift[]>([]);
@@ -68,7 +84,6 @@ export function StaffAttendance() {
   const [error, setError] = useState("");
   const [filterUserId, setFilterUserId] = useState("");
 
-  // Modal chấm công / sửa công
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState({
@@ -172,7 +187,6 @@ export function StaffAttendance() {
     try {
       const token = await auth.currentUser?.getIdToken();
 
-      // Xây datetime từ date + time input
       const buildDateTime = (date: string, time: string): string | null => {
         if (!time) return null;
         return `${date}T${time}:00`;
@@ -217,9 +231,120 @@ export function StaffAttendance() {
     }
   };
 
-  const getDayOfWeek = (dateStr: string) => {
-    const d = new Date(dateStr + "T00:00:00");
-    return WEEKDAY_SHORT[d.getDay()];
+  // ---- Xuất Excel ----
+  const handleExportExcel = () => {
+    if (records.length === 0) return;
+
+    const wb = XLSX.utils.book_new();
+
+    // === Sheet 1: Bảng công chi tiết ===
+    const detailRows = records.map((r, idx) => ({
+      STT: idx + 1,
+      "Nhân viên": r.userName || r.userEmail,
+      Ngày: r.workDate.split("-").reverse().join("/"),
+      Thứ: getDayOfWeek(r.workDate),
+      Ca: r.shiftName || "",
+      "Giờ ca": r.shiftStartTime && r.shiftEndTime
+        ? `${formatTime(r.shiftStartTime)}–${formatTime(r.shiftEndTime)}`
+        : "",
+      "Giờ vào": formatHM(r.checkInTime),
+      "Giờ ra": formatHM(r.checkOutTime),
+      "Số giờ làm": computeHours(r.checkInTime, r.checkOutTime),
+      "Muộn (phút)": r.lateMinutes || "",
+      "Về sớm (phút)": r.earlyLeaveMinutes || "",
+      "Nguồn": r.source === "camera" ? "Camera" : "Thủ công",
+      "Ghi chú": r.note || "",
+    }));
+
+    const wsDetail = XLSX.utils.json_to_sheet(detailRows);
+
+    // Độ rộng cột hợp lý
+    wsDetail["!cols"] = [
+      { wch: 5 },   // STT
+      { wch: 22 },  // Nhân viên
+      { wch: 12 },  // Ngày
+      { wch: 5 },   // Thứ
+      { wch: 14 },  // Ca
+      { wch: 14 },  // Giờ ca
+      { wch: 8 },   // Giờ vào
+      { wch: 8 },   // Giờ ra
+      { wch: 10 },  // Số giờ làm
+      { wch: 12 },  // Muộn
+      { wch: 14 },  // Về sớm
+      { wch: 10 },  // Nguồn
+      { wch: 25 },  // Ghi chú
+    ];
+
+    XLSX.utils.book_append_sheet(wb, wsDetail, "Bảng công chi tiết");
+
+    // === Sheet 2: Tổng hợp theo nhân viên ===
+    const summaryMap = new Map<number, {
+      name: string;
+      totalDays: number;
+      totalLate: number;
+      lateDays: number;
+      totalEarly: number;
+      earlyDays: number;
+      totalMinutes: number;
+    }>();
+
+    records.forEach((r) => {
+      let entry = summaryMap.get(r.userId);
+      if (!entry) {
+        entry = {
+          name: r.userName || r.userEmail,
+          totalDays: 0,
+          totalLate: 0,
+          lateDays: 0,
+          totalEarly: 0,
+          earlyDays: 0,
+          totalMinutes: 0,
+        };
+        summaryMap.set(r.userId, entry);
+      }
+      entry.totalDays++;
+      if (r.lateMinutes > 0) {
+        entry.totalLate += r.lateMinutes;
+        entry.lateDays++;
+      }
+      if (r.earlyLeaveMinutes > 0) {
+        entry.totalEarly += r.earlyLeaveMinutes;
+        entry.earlyDays++;
+      }
+      if (r.checkInTime && r.checkOutTime) {
+        const diff = new Date(r.checkOutTime).getTime() - new Date(r.checkInTime).getTime();
+        if (diff > 0) entry.totalMinutes += Math.round(diff / 60000);
+      }
+    });
+
+    const summaryRows = Array.from(summaryMap.values()).map((e, idx) => ({
+      STT: idx + 1,
+      "Nhân viên": e.name,
+      "Tổng ngày công": e.totalDays,
+      "Tổng giờ làm": `${Math.floor(e.totalMinutes / 60)}h${String(e.totalMinutes % 60).padStart(2, "0")}`,
+      "Số lần muộn": e.lateDays,
+      "Tổng muộn (phút)": e.totalLate || "",
+      "Số lần về sớm": e.earlyDays,
+      "Tổng về sớm (phút)": e.totalEarly || "",
+    }));
+
+    const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
+    wsSummary["!cols"] = [
+      { wch: 5 },   // STT
+      { wch: 22 },  // Nhân viên
+      { wch: 14 },  // Tổng ngày công
+      { wch: 14 },  // Tổng giờ làm
+      { wch: 12 },  // Số lần muộn
+      { wch: 16 },  // Tổng muộn
+      { wch: 14 },  // Số lần về sớm
+      { wch: 18 },  // Tổng về sớm
+    ];
+
+    XLSX.utils.book_append_sheet(wb, wsSummary, "Tổng hợp");
+
+    // Xuất file
+    const fileName = `Bang_cong_T${month}_${year}.xlsx`;
+    XLSX.writeFile(wb, fileName);
   };
 
   return (
@@ -234,6 +359,11 @@ export function StaffAttendance() {
           <button onClick={() => fetchData(true)} disabled={loading || refreshing} className="inline-flex items-center gap-2 rounded-md bg-white px-3 py-2 text-sm text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-50">
             <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
           </button>
+          {records.length > 0 && (
+            <button onClick={handleExportExcel} className="inline-flex items-center gap-2 rounded-md bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50">
+              <Download className="h-4 w-4" /> Xuất Excel
+            </button>
+          )}
           {canEdit && (
             <button onClick={openNewModal} className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700">
               <Plus className="h-4 w-4" /> Chấm công tay

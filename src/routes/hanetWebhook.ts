@@ -1,9 +1,11 @@
 /**
  * Webhook Hanet AI Camera + Hàng đợi check-in chưa xác định được lớp.
  *
- * Route CÔNG KHAI - Hanet gọi trực tiếp từ camera/cloud của họ, KHÔNG có Firebase token nên
- * KHÔNG qua requireAuth. Bảo mật bằng cách tự tính lại hash = MD5(client_secret + id) và so
- * khớp với hash Hanet gửi kèm mỗi request.
+ * Route CÔNG KHAI — Hanet gọi trực tiếp từ camera/cloud, KHÔNG có Firebase token
+ * nên KHÔNG qua requireAuth. Bảo mật bằng hash = MD5(client_secret + id).
+ *
+ * MULTI-TENANT: Duyệt toàn bộ tenant đã cấu hình Client Secret trong DB, tìm
+ * tenant có secret khớp hash. Cache 5 phút để giảm tải DB.
  */
 import type { Express } from "express";
 import { requireAuth, type AuthRequest } from "../middleware/auth.js";
@@ -16,6 +18,7 @@ import {
   attendance,
   attendanceSessions,
   hanetPendingCheckins,
+  settings,
 } from "../db/schema.js";
 import { eq, and, gte, lte, inArray, desc, isNull, sql } from "drizzle-orm";
 import {
@@ -26,7 +29,89 @@ import {
 } from "../lib/hanet.js";
 import { HANET_SESSION_EXPIRY_HOURS } from "./_helpers.js";
 
+/* ================================================================
+ * Cache Secret multi-tenant
+ * ================================================================
+ * - Lưu Map<tenantId, clientSecret> trong globalThis
+ * - Tự hết hạn sau 5 phút
+ * - Bị xóa ngay khi admin cập nhật secret (settings route set
+ *   globalThis.__hanetSecretCache = undefined)
+ * ================================================================ */
+
+interface HanetSecretCache {
+  secrets: Map<string, string>;
+  expiresAt: number;
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __hanetSecretCache: HanetSecretCache | undefined;
+}
+
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getHanetSecrets(): Promise<Map<string, string>> {
+  const now = Date.now();
+  const cache = globalThis.__hanetSecretCache;
+
+  if (cache && now < cache.expiresAt) {
+    return cache.secrets;
+  }
+
+  const rows = await db
+    .select({
+      tenantId: settings.tenantId,
+      hanetClientSecret: settings.hanetClientSecret,
+    })
+    .from(settings);
+
+  const secrets = new Map<string, string>();
+  const seenSecrets = new Map<string, string>();
+
+  for (const row of rows) {
+    if (row.hanetClientSecret) {
+      const existingTenant = seenSecrets.get(row.hanetClientSecret);
+      if (existingTenant) {
+        console.error(
+          `[HANET] CẢNH BÁO: Tenant "${row.tenantId}" trùng Client Secret với "${existingTenant}". ` +
+            `Webhook sẽ không thể phân biệt — hãy đổi secret của một bên.`,
+        );
+      } else {
+        seenSecrets.set(row.hanetClientSecret, row.tenantId);
+      }
+      secrets.set(row.tenantId, row.hanetClientSecret);
+    }
+  }
+
+  globalThis.__hanetSecretCache = { secrets, expiresAt: now + CACHE_TTL_MS };
+  return secrets;
+}
+
+/**
+ * Tìm tất cả tenant có secret khớp hash. Nếu >1 match → trùng secret,
+ * phải từ chối để tránh ghi nhầm dữ liệu.
+ */
+function findMatchingTenants(
+  recordId: string,
+  hash: string,
+  secrets: Map<string, string>,
+): string[] {
+  const matches: string[] = [];
+  for (const [tenantId, secret] of secrets) {
+    if (verifyHanetHash(recordId, hash, secret)) {
+      matches.push(tenantId);
+    }
+  }
+  return matches;
+}
+
+/* ================================================================
+ * Routes
+ * ================================================================ */
+
 export function registerHanetRoutes(app: Express): void {
+  /* ===== Webhook chính — công khai, Hanet gọi ===== */
+
   app.post("/api/webhooks/hanet", async (req, res) => {
     try {
       const payload = req.body as HanetWebhookPayload;
@@ -41,25 +126,48 @@ export function registerHanetRoutes(app: Express): void {
           personType: payload.personType,
         }),
       );
-      const clientSecret = process.env.HANET_CLIENT_SECRET;
 
-      if (!clientSecret) {
+      /* --- Xác thực multi-tenant --- */
+
+      const secrets = await getHanetSecrets();
+
+      if (secrets.size === 0) {
         console.error(
-          "Hanet webhook: thiếu HANET_CLIENT_SECRET trong .env, từ chối toàn bộ request.",
+          "[HANET] Chưa có tenant nào cấu hình Client Secret trong DB.",
         );
-        return res.status(500).json({ error: "Server misconfigured" });
+        return res.status(200).json({ received: true, processed: false });
       }
 
-      if (!verifyHanetHash(payload.id, payload.hash, clientSecret)) {
-        console.warn("Hanet webhook: hash không hợp lệ, từ chối request.", {
+      const matchedTenants = findMatchingTenants(
+        payload.id,
+        payload.hash,
+        secrets,
+      );
+
+      if (matchedTenants.length === 0) {
+        console.warn("[HANET] Hash không khớp với bất kỳ tenant nào.", {
           id: payload.id,
         });
         return res.status(401).json({ error: "Invalid signature" });
       }
 
+      if (matchedTenants.length > 1) {
+        console.error(
+          "[HANET] Hash khớp với NHIỀU tenant — không thể phân biệt. " +
+            "Kiểm tra trùng Client Secret.",
+          matchedTenants,
+        );
+        return res.status(500).json({ error: "Ambiguous tenant match" });
+      }
+
+      const tenantId = matchedTenants[0];
+
+      /* --- Chỉ xử lý sự kiện log (check-in) --- */
+
       if (payload.data_type !== "log") {
         console.log(
-          `Hanet webhook: nhận sự kiện data_type="${payload.data_type}" action_type="${payload.action_type}" - chỉ ghi nhận, chưa xử lý sâu.`,
+          `[HANET] tenant=${tenantId} data_type="${payload.data_type}" ` +
+            `action_type="${payload.action_type}" — ghi nhận, chưa xử lý sâu.`,
         );
         return res.status(200).json({ received: true });
       }
@@ -75,25 +183,25 @@ export function registerHanetRoutes(app: Express): void {
         return res.status(200).json({ received: true, processed: false });
       }
 
-      // Tra học viên theo hanetPersonId (chỉ tính học viên chưa xóa mềm)
+      /* --- Tra học viên — lọc theo tenantId để không nhầm tenant khác --- */
+
       const matchedStudents = await db
         .select()
         .from(students)
         .where(
           and(
             eq(students.hanetPersonId, personID),
+            eq(students.tenantId, tenantId),
             eq(students.isDeleted, false),
           ),
         )
         .limit(1);
 
       if (matchedStudents.length === 0) {
-        const fallbackTenantId =
-          process.env.HANET_DEFAULT_TENANT_ID || "default-tenant";
         await db
           .insert(hanetPendingCheckins)
           .values({
-            tenantId: fallbackTenantId,
+            tenantId,
             hanetRecordId: payload.id,
             hanetPersonId: personID,
             personName: personName || null,
@@ -110,7 +218,6 @@ export function registerHanetRoutes(app: Express): void {
       }
 
       const student = matchedStudents[0];
-      const tenantId = student.tenantId;
 
       const enrollments = await db
         .select({ classId: classEnrollments.classId })
@@ -221,7 +328,8 @@ export function registerHanetRoutes(app: Express): void {
     }
   });
 
-  // ===== Hàng đợi check-in Hanet =====
+  /* ===== Hàng đợi check-in Hanet (đã dùng tenantId từ requireAuth) ===== */
+
   app.get(
     "/api/hanet-pending-checkins",
     requireAuth,
@@ -284,7 +392,6 @@ export function registerHanetRoutes(app: Express): void {
         }
         const parsedClassId = parseInt(classId);
 
-        // Kiểm tra quyền với lớp được chọn NGAY TỪ ĐẦU
         if (req.dbUser.role === "teacher") {
           const allowed = await db
             .select({ id: classes.id })
@@ -452,7 +559,7 @@ export function registerHanetRoutes(app: Express): void {
       } catch (error: unknown) {
         const message =
           error instanceof Error ? error.message : "";
-        const errObj = error as any;
+        const errObj = error as Record<string, unknown>;
         const isDuplicateKey =
           errObj?.code === "ER_DUP_ENTRY" ||
           errObj?.errno === 1062 ||

@@ -79,6 +79,7 @@ export const settings = mysqlTable('settings', {
   tenantId: varchar('tenant_id', { length: 128 }).notNull().unique(),
   centerName: varchar('center_name', { length: 255 }).notNull().default('Schooling'),
   logoUrl: text('logo_url'),
+  hanetClientSecret: varchar("hanet_client_secret", { length: 255 }),
   updatedAt: datetime('updated_at', { mode: 'date' }).default(sql`CURRENT_TIMESTAMP`),
 });
 

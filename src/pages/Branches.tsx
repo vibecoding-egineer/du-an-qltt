@@ -1,7 +1,23 @@
+/**
+ * Branches — Quản lý cơ sở (/settings)
+ *
+ * Trang CRUD chi nhánh / cơ sở:
+ * - Liệt kê danh sách cơ sở dạng card grid
+ * - Tạo mới / chỉnh sửa cơ sở qua modal
+ *
+ * Thay đổi so với bản trước:
+ * - Bỏ tabs (Ca làm việc chuyển sang Kế toán–NS, Camera tách riêng)
+ * - Chỉ render trực tiếp danh sách cơ sở + modal
+ * - Giữ nguyên 100% logic CRUD gốc
+ */
+
 import React, { useState, useEffect } from "react";
-import { Plus, Building2, MapPin, Phone, Pencil, Save, Upload } from "lucide-react";
+import { Plus, Building2, MapPin, Phone, Pencil } from "lucide-react";
 import { auth } from "../lib/firebase";
-import { ShiftsManager } from "../components/ShiftsManager";
+
+/* ══════════════════════════════════════════════════════════
+   Types
+   ══════════════════════════════════════════════════════════ */
 
 interface Branch {
   id: number;
@@ -11,8 +27,11 @@ interface Branch {
   address: string | null;
 }
 
+/* ══════════════════════════════════════════════════════════
+   Component
+   ══════════════════════════════════════════════════════════ */
+
 export function Branches() {
-  const [activeTab, setActiveTab] = useState<'branches' | 'shifts'>('branches');
   const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -24,11 +43,12 @@ export function Branches() {
     address: "",
   });
 
+  /* ── Fetch danh sách cơ sở ── */
   const fetchBranches = async () => {
     try {
       const token = await auth.currentUser?.getIdToken();
       const res = await fetch("/api/branches", {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
@@ -45,21 +65,24 @@ export function Branches() {
     fetchBranches();
   }, []);
 
+  /* ── Tạo / Cập nhật cơ sở ── */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       const token = await auth.currentUser?.getIdToken();
       const isEditing = editingBranch !== null;
-      const url = isEditing ? `/api/branches/${editingBranch.id}` : "/api/branches";
+      const url = isEditing
+        ? `/api/branches/${editingBranch.id}`
+        : "/api/branches";
       const method = isEditing ? "PUT" : "POST";
-      
+
       const res = await fetch(url, {
         method,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(formData)
+        body: JSON.stringify(formData),
       });
       if (res.ok) {
         setFormData({ name: "", code: "", phone: "", address: "" });
@@ -67,13 +90,18 @@ export function Branches() {
         setShowModal(false);
         fetchBranches();
       } else {
-        alert(isEditing ? "Cập nhật cơ sở thất bại." : "Thêm cơ sở thất bại. Có thể mã cơ sở đã tồn tại.");
+        alert(
+          isEditing
+            ? "Cập nhật cơ sở thất bại."
+            : "Thêm cơ sở thất bại. Có thể mã cơ sở đã tồn tại.",
+        );
       }
     } catch (err) {
       console.error(err);
     }
   };
 
+  /* ── Mở modal chỉnh sửa ── */
   const handleEdit = (branch: Branch) => {
     setEditingBranch(branch);
     setFormData({
@@ -85,52 +113,28 @@ export function Branches() {
     setShowModal(true);
   };
 
+  /* ── Đóng modal + reset form ── */
   const handleCloseModal = () => {
     setShowModal(false);
     setEditingBranch(null);
     setFormData({ name: "", code: "", phone: "", address: "" });
   };
 
+  /* ══════════════════════════════════════════════════════════
+     Render
+     ══════════════════════════════════════════════════════════ */
+
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-900">Quản lý Cơ sở</h2>
-        <p className="mt-1 text-sm text-slate-500">
-          Quản lý thông tin cơ sở và các ca làm việc của trung tâm.
-        </p>
-      </div>
-
-      <div className="border-b border-slate-200">
-        <nav className="-mb-px flex gap-6">
-          <button
-            onClick={() => setActiveTab('branches')}
-            className={`border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
-              activeTab === 'branches'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
-            }`}
-          >
-            Cơ sở
-          </button>
-          <button
-            onClick={() => setActiveTab('shifts')}
-            className={`border-b-2 px-1 pb-3 text-sm font-medium transition-colors ${
-              activeTab === 'shifts'
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-700'
-            }`}
-          >
-            Ca làm việc
-          </button>
-        </nav>
-      </div>
-
-      {activeTab === 'shifts' ? (
-        <ShiftsManager />
-      ) : (
-      <div className="space-y-6">
-      <div className="flex items-center justify-end">
-        <button 
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900">Quản lý Cơ sở</h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Quản lý thông tin các cơ sở / chi nhánh của trung tâm.
+          </p>
+        </div>
+        <button
           onClick={() => {
             setEditingBranch(null);
             setFormData({ name: "", code: "", phone: "", address: "" });
@@ -143,6 +147,7 @@ export function Branches() {
         </button>
       </div>
 
+      {/* ── Danh sách cơ sở ── */}
       <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
         {loading ? (
           <div className="col-span-full py-12 text-center text-sm text-slate-500">
@@ -154,15 +159,22 @@ export function Branches() {
           </div>
         ) : (
           branches.map((branch) => (
-            <div key={branch.id} className="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-slate-200">
+            <div
+              key={branch.id}
+              className="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-slate-200"
+            >
               <div className="border-b border-slate-100 bg-slate-50 p-4 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 text-blue-600">
                     <Building2 className="h-5 w-5" />
                   </div>
                   <div>
-                    <h3 className="font-semibold text-slate-900">{branch.name}</h3>
-                    <span className="text-xs font-medium text-slate-500">Mã: {branch.code}</span>
+                    <h3 className="font-semibold text-slate-900">
+                      {branch.name}
+                    </h3>
+                    <span className="text-xs font-medium text-slate-500">
+                      Mã: {branch.code}
+                    </span>
                   </div>
                 </div>
                 <button
@@ -180,16 +192,17 @@ export function Branches() {
                 </div>
                 <div className="flex items-start gap-2 text-sm text-slate-600">
                   <MapPin className="h-4 w-4 text-slate-400 shrink-0 mt-0.5" />
-                  <span className="line-clamp-2">{branch.address || "Chưa cập nhật"}</span>
+                  <span className="line-clamp-2">
+                    {branch.address || "Chưa cập nhật"}
+                  </span>
                 </div>
               </div>
             </div>
           ))
         )}
       </div>
-      </div>
-      )}
 
+      {/* ── Modal tạo / chỉnh sửa cơ sở ── */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
@@ -198,42 +211,58 @@ export function Branches() {
             </h3>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-slate-700">Tên cơ sở (*)</label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Tên cơ sở (*)
+                </label>
                 <input
                   required
                   type="text"
                   value={formData.name}
-                  onChange={(e) => setFormData({...formData, name: e.target.value})}
+                  onChange={(e) =>
+                    setFormData({ ...formData, name: e.target.value })
+                  }
                   className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm"
                   placeholder="Ví dụ: Cơ sở 1 - Hà Nội"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700">Mã cơ sở (*)</label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Mã cơ sở (*)
+                </label>
                 <input
                   required
                   type="text"
                   value={formData.code}
-                  onChange={(e) => setFormData({...formData, code: e.target.value})}
+                  onChange={(e) =>
+                    setFormData({ ...formData, code: e.target.value })
+                  }
                   className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm"
                   placeholder="Ví dụ: CS1"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700">Điện thoại</label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Điện thoại
+                </label>
                 <input
                   type="text"
                   value={formData.phone}
-                  onChange={(e) => setFormData({...formData, phone: e.target.value})}
+                  onChange={(e) =>
+                    setFormData({ ...formData, phone: e.target.value })
+                  }
                   className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700">Địa chỉ</label>
+                <label className="block text-sm font-medium text-slate-700">
+                  Địa chỉ
+                </label>
                 <input
                   type="text"
                   value={formData.address}
-                  onChange={(e) => setFormData({...formData, address: e.target.value})}
+                  onChange={(e) =>
+                    setFormData({ ...formData, address: e.target.value })
+                  }
                   className="mt-1 block w-full rounded-md border-0 py-1.5 px-3 text-slate-900 ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm"
                 />
               </div>

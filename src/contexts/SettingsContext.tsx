@@ -7,6 +7,7 @@ interface Settings {
   tenantId: string;
   centerName: string;
   logoUrl: string | null;
+  hasHanetSecret?: boolean;
 }
 
 interface SettingsContextType {

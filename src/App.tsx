@@ -1,6 +1,26 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * App.tsx — Root component với routing + RBAC.
+ *
+ * Thay đổi so với phiên bản cũ (Bước 4 – UI Redesign):
+ * - Thêm import 5 module components từ ModuleRoutes.tsx
+ * - Thêm 5 routes: /setup, /operations, /customer-care, /accounting, /director
+ * - Đặt module routes TRƯỚC catch-all "*" route
+ *
+ * GIỮ NGUYÊN:
+ * - ProtectedRoute logic (auth + RBAC + onboarding)
+ * - Tất cả feature routes hiện tại
+ * - Catch-all "*" → "Chưa triển khai"
+ * - Import navigation từ Sidebar cho permission check
+ *
+ * LƯU Ý RBAC cho module routes:
+ * - /setup, /operations, /accounting, /director: KHÔNG nằm trong
+ *   navigation array → ProtectedRoute cho qua → ModulePage tự lọc
+ *   features theo quyền (hiện empty state nếu user không có quyền)
+ * - /customer-care: NẰM trong navigation (từ sidebar item "Chăm sóc
+ *   KH (Zalo)") → ProtectedRoute kiểm tra roles/permissions trước
  */
 
 import React from "react";
@@ -17,6 +37,8 @@ import { Schedule } from "./pages/Schedule";
 import { HanetQueue } from "./pages/HanetQueue";
 import { Finance } from "./pages/Finance";
 import { Promotions } from "./pages/Promotions";
+import { Appearance } from "./pages/Appearance";
+import { Camera } from "./pages/Camera";
 import { Login } from "./pages/Login";
 import { Onboarding } from "./pages/Onboarding";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
@@ -25,11 +47,18 @@ import { navigation } from "./components/Sidebar";
 import { Shifts } from "./pages/Shifts";
 import { StaffShifts } from "./pages/StaffShifts";
 import { StaffAttendance } from "./pages/StaffAttendance";
+import {
+  SetupModule,
+  OperationsModule,
+  CustomerCareModule,
+  AccountingModule,
+  DirectorModule,
+} from "./pages/ModuleRoutes";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, dbUser, loading, needsOnboarding, refreshDbUser } = useAuth();
   const location = useLocation();
-  
+
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center bg-slate-50">
@@ -37,7 +66,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
-  
+
   if (!user) {
     return <Navigate to="/login" replace />;
   }
@@ -49,12 +78,12 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   // Permission Check
   if (dbUser && dbUser.role !== 'admin') {
     const currentPath = location.pathname;
-    
+
     // Always allow access to dashboard
     if (currentPath === '/') return <>{children}</>;
 
     const navItem = navigation.find(item => item.href === currentPath);
-    
+
     if (navItem) {
       if (dbUser.permissions) {
         if (!dbUser.permissions.includes(currentPath)) {
@@ -75,7 +104,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
       }
     }
   }
-  
+
   return <>{children}</>;
 }
 
@@ -91,12 +120,13 @@ export default function App() {
               <Route path="inventory" element={<Inventory />} />
               <Route path="hr" element={<Employees />} />
 
-
-              <Route path="staff-shifts" element={<StaffShifts />} />          
-              <Route path="staff-attendance" element={<StaffAttendance />} />    
+              <Route path="staff-shifts" element={<StaffShifts />} />
+              <Route path="staff-attendance" element={<StaffAttendance />} />
 
               <Route path="settings" element={<Branches />} />
-              <Route path="shifts" element={<Shifts />} />  
+              <Route path="settings/appearance" element={<Appearance />} />
+              <Route path="settings/camera" element={<Camera />} />
+              <Route path="shifts" element={<Shifts />} />
               <Route path="classes" element={<Classes />} />
               <Route path="students" element={<Students />} />
               <Route path="attendance" element={<Attendance />} />
@@ -104,6 +134,14 @@ export default function App() {
               <Route path="hanet-checkins" element={<HanetQueue />} />
               <Route path="finance" element={<Finance />} />
               <Route path="promotions" element={<Promotions />} />
+
+              {/* ── Module routes (Bước 4 – UI Redesign) ── */}
+              <Route path="setup" element={<SetupModule />} />
+              <Route path="operations" element={<OperationsModule />} />
+              <Route path="customer-care" element={<CustomerCareModule />} />
+              <Route path="accounting" element={<AccountingModule />} />
+              <Route path="director" element={<DirectorModule />} />
+
               <Route path="*" element={
                 <div className="flex h-full items-center justify-center flex-col text-slate-500">
                   <p className="text-xl font-medium text-slate-900">Chưa triển khai</p>
