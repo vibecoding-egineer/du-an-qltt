@@ -9,9 +9,11 @@ import {
   mysqlEnum,
   index,
   uniqueIndex,
+  unique,
   customType,
   time,
   date,
+  decimal,
 } from 'drizzle-orm/mysql-core';
 
 /*
@@ -119,6 +121,23 @@ export const users = mysqlTable('users', {
   hanetPersonId: varchar('hanet_person_id', { length: 128 }).unique(),
   createdAt: datetime('created_at', { mode: 'date' }).default(sql`CURRENT_TIMESTAMP`),
 });
+
+// Bảng liên kết user ↔ branch (many-to-many): cho phép gán một nhân viên vào nhiều cơ sở.
+// Thay thế vai trò của cột users.branch_id (chỉ chứa được 1 branch).
+// Admin dùng trang Quản lý nhân viên để chọn các cơ sở cho từng người — nhân viên chỉ thấy
+// dữ liệu (lớp, học viên, giao dịch…) thuộc các cơ sở đã được phân quyền.
+export const userBranches = mysqlTable('user_branches', {
+  id: int('id').autoincrement().primaryKey(),
+  userId: int('user_id').notNull().references(() => users.id),
+  branchId: int('branch_id').notNull().references(() => branches.id),
+  tenantId: varchar('tenant_id', { length: 128 }).notNull(),
+  createdAt: datetime('created_at', { mode: 'date' }).default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  unique('uq_user_branch').on(table.userId, table.branchId),
+  index('idx_user_branches_user').on(table.userId),
+  index('idx_user_branches_branch').on(table.branchId),
+  index('idx_user_branches_tenant').on(table.tenantId),
+]);
 
 export const classes = mysqlTable('classes', {
   id: int('id').autoincrement().primaryKey(),
@@ -286,6 +305,17 @@ export const transactionsRelations = relations(transactions, ({ one }) => ({
   }),
 }));
 
+export const userBranchesRelations = relations(userBranches, ({ one }) => ({
+  user: one(users, {
+    fields: [userBranches.userId],
+    references: [users.id],
+  }),
+  branch: one(branches, {
+    fields: [userBranches.branchId],
+    references: [branches.id],
+  }),
+}));
+
 export const promotions = mysqlTable('promotions', {
   id: int('id').autoincrement().primaryKey(),
   tenantId: varchar('tenant_id', { length: 128 }).notNull(),
@@ -360,12 +390,48 @@ export const attendanceSessions = mysqlTable('attendance_sessions', {
   index('attendance_sessions_class_id_idx').on(table.classId),
 ]);
 
+// Mapping camera Hanet (placeID/deviceID) với cơ sở trong hệ thống.
+// Khi webhook check-in đến, hệ thống dùng placeID tra bảng này để biết camera thuộc cơ sở nào.
+//
+// Cách mapping:
+//   - device_id IS NULL  → mapping TOÀN BỘ địa điểm (place-level)
+//   - device_id có giá trị → mapping RIÊNG camera đó (device-level), ưu tiên hơn place-level
+export const cameraDevices = mysqlTable('camera_devices', {
+  id: int('id').autoincrement().primaryKey(),
+  tenantId: varchar('tenant_id', { length: 128 }).notNull(),
+  branchId: int('branch_id').references(() => branches.id).notNull(),
+  placeId: varchar('place_id', { length: 128 }),              // placeID từ Hanet (nullable — tự cập nhật từ webhook)
+  placeName: varchar('place_name', { length: 255 }),           // tên địa điểm trên Hanet Connect
+  deviceId: varchar('device_id', { length: 128 }),             // serial camera (VD: V21443M409)
+  deviceName: varchar('device_name', { length: 255 }),         // tên camera
+  isDeleted: boolean('is_deleted').notNull().default(false),
+  deletedAt: datetime('deleted_at', { mode: 'date' }),
+  createdAt: datetime('created_at', { mode: 'date' }).default(sql`CURRENT_TIMESTAMP`),
+
+  // Cột sinh tự động chống trùng mapping — cùng cơ chế với students, classEnrollments, ...
+  // Dựa trên place_name + device_id (thay vì place_id) để admin mapping bằng tên/serial
+  activeNameDevice: varchar('active_name_device', { length: 520 })
+    .generatedAlwaysAs(
+      sql`(CASE WHEN is_deleted = 0 THEN CONCAT(tenant_id, '-', COALESCE(place_name, '__NO_PLACE__'), '-', COALESCE(device_id, '__NO_DEVICE__')) ELSE NULL END)`,
+      { mode: 'stored' },
+    ),
+}, (table) => [
+  index('camera_devices_tenant_id_idx').on(table.tenantId),
+  index('camera_devices_branch_id_idx').on(table.branchId),
+  index('camera_devices_place_name_idx').on(table.tenantId, table.placeName),
+  index('camera_devices_device_id_idx').on(table.tenantId, table.deviceId),
+  uniqueIndex('camera_devices_active_name_device_unique').on(table.activeNameDevice),
+]);
+
 // Hàng đợi các check-in từ camera Hanet mà hệ thống KHÔNG tự tin gán được vào đúng 1
 // lớp cụ thể (lý do cụ thể xem HANET_PENDING_CHECKIN_REASONS ở trên). Nhân viên xử lý
 // thủ công qua UI, chọn lớp rồi hệ thống mới thực sự tạo bản ghi trong bảng `attendance`.
 export const hanetPendingCheckins = mysqlTable('hanet_pending_checkins', {
   id: int('id').autoincrement().primaryKey(),
   tenantId: varchar('tenant_id', { length: 128 }).notNull(),
+  // Cơ sở mà camera ghi nhận check-in thuộc về (tra từ bảng camera_devices qua placeID).
+  // Nullable vì: dữ liệu cũ chưa có, hoặc camera chưa được mapping vào cơ sở nào.
+  branchId: int('branch_id').references(() => branches.id),
   hanetRecordId: varchar('hanet_record_id', { length: 128 }).notNull(), // chống xử lý trùng nếu webhook gọi lại
   hanetPersonId: varchar('hanet_person_id', { length: 128 }).notNull(),
   personName: varchar('person_name', { length: 255 }), // tên Hanet gửi kèm
@@ -380,6 +446,7 @@ export const hanetPendingCheckins = mysqlTable('hanet_pending_checkins', {
   createdAt: datetime('created_at', { mode: 'date' }).default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [
   index('hanet_pending_checkins_tenant_id_idx').on(table.tenantId),
+  index('hanet_pending_checkins_branch_id_idx').on(table.branchId),
   index('hanet_pending_checkins_student_id_idx').on(table.studentId),
   uniqueIndex('hanet_pending_checkins_record_id_unique').on(table.hanetRecordId),
 ]);
@@ -395,7 +462,18 @@ export const attendanceSessionsRelations = relations(attendanceSessions, ({ one 
   }),
 }));
 
+export const cameraDevicesRelations = relations(cameraDevices, ({ one }) => ({
+  branch: one(branches, {
+    fields: [cameraDevices.branchId],
+    references: [branches.id],
+  }),
+}));
+
 export const hanetPendingCheckinsRelations = relations(hanetPendingCheckins, ({ one }) => ({
+  branch: one(branches, {
+    fields: [hanetPendingCheckins.branchId],
+    references: [branches.id],
+  }),
   student: one(students, {
     fields: [hanetPendingCheckins.studentId],
     references: [students.id],
@@ -557,3 +635,24 @@ export const staffAttendanceRelations = relations(staffAttendance, ({ one }) => 
     references: [shifts.id],
   }),
 }));
+
+/* ══════════════════════════════════════════════════════════
+   LOẠI LƯƠNG (salary_types)
+
+   Dùng chung cho tất cả cơ sở (branch) trong cùng 1 tenant.
+   4 hình thức: fixed | percentage | per_shift | per_hour
+   amount kiểu DECIMAL(12,4) — chứa được cả VND lẫn % thập phân.
+   ══════════════════════════════════════════════════════════ */
+export const salaryTypes = mysqlTable('salary_types', {
+  id: int('id').autoincrement().primaryKey(),
+  tenantId: varchar('tenant_id', { length: 128 }).notNull(),
+  name: varchar('name', { length: 100 }).notNull(),
+  type: varchar('type', { length: 16 }).notNull(), // 'fixed' | 'percentage' | 'per_shift' | 'per_hour'
+  amount: decimal('amount', { precision: 12, scale: 4 }).notNull(),
+  isDeleted: boolean('is_deleted').default(false).notNull(),
+  deletedAt: datetime('deleted_at'),
+  createdAt: datetime('created_at').default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: datetime('updated_at').default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+  index('idx_salary_types_tenant').on(table.tenantId),
+]);

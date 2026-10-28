@@ -26,6 +26,8 @@ import { registerTransactionRoutes } from "./src/routes/transactions.js";
 import { registerPromotionRoutes } from "./src/routes/promotions.js";
 import { registerStaffShiftRoutes } from "./src/routes/staffShifts.js";
 import { registerStaffAttendanceRoutes } from "./src/routes/staffAttendance.js";
+import { registerCameraDeviceRoutes } from "./src/routes/cameraDevices.js";
+import { registerSalaryTypeRoutes } from "./src/routes/salaryTypes.js";
 
 async function startServer() {
   const app = express();
@@ -56,6 +58,8 @@ async function startServer() {
   registerPromotionRoutes(app);
   registerStaffShiftRoutes(app);
   registerStaffAttendanceRoutes(app);
+  registerCameraDeviceRoutes(app);
+  registerSalaryTypeRoutes(app);
 
   // Mock inventory (giữ lại cho tương lai)
   app.get("/api/inventory", (_req, res) => {

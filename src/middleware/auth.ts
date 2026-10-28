@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { adminAuth } from '../lib/firebase-admin.js';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { db } from '../db/index.js';
-import { users, licenses } from '../db/schema.js';
+import { users, licenses, userBranches } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 
 // Kiểu dữ liệu người dùng lấy từ bảng `users`, suy ra tự động từ schema Drizzle
@@ -12,6 +12,12 @@ export type DbUser = typeof users.$inferSelect;
 export interface AuthRequest extends Request {
   user?: DecodedIdToken;
   dbUser?: DbUser;
+  /**
+   * Danh sách branch IDs mà user được phân quyền truy cập.
+   * - Admin: luôn `undefined` → các route hiểu là "xem tất cả".
+   * - Non-admin: mảng (có thể rỗng) → route dùng `getBranchFilter()` để lọc.
+   */
+  allowedBranchIds?: number[];
 }
 
 export const requireAuth = async (
@@ -33,6 +39,22 @@ export const requireAuth = async (
       const dbUserResult = await db.select().from(users).where(eq(users.uid, decodedToken.uid));
       if (dbUserResult.length > 0) {
         req.dbUser = dbUserResult[0];
+
+        // Load danh sách cơ sở được phân quyền cho nhân viên (non-admin).
+        // Admin mặc định xem TẤT CẢ → không cần query, allowedBranchIds giữ undefined.
+        // Query nhẹ, đánh index idx_user_branches_user(user_id).
+        if (req.dbUser.role !== 'admin') {
+          try {
+            const branchRows = await db
+              .select({ branchId: userBranches.branchId })
+              .from(userBranches)
+              .where(eq(userBranches.userId, req.dbUser.id));
+            req.allowedBranchIds = branchRows.map(r => r.branchId);
+          } catch (branchErr) {
+            console.error('Error loading allowedBranchIds in auth middleware', branchErr);
+            // allowedBranchIds giữ undefined → getBranchFilter sẽ chặn toàn bộ (an toàn)
+          }
+        }
       }
     } catch (dbErr) {
       console.error('Error fetching dbUser in auth middleware', dbErr);

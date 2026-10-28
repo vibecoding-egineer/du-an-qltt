@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
-import { Briefcase, UserPlus, Shield, User, X, CheckSquare } from "lucide-react";
+import { Briefcase, UserPlus, Shield, User, X, CheckSquare, Building2 } from "lucide-react";
 import { auth } from "../lib/firebase";
 import { navigation } from "../components/Sidebar";
 
@@ -18,6 +18,12 @@ interface Employee {
   createdAt: string;
 }
 
+interface BranchInfo {
+  branchId: number;
+  branchName: string;
+  branchCode: string;
+}
+
 export function Employees() {
   const { dbUser } = useAuth();
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -29,32 +35,59 @@ export function Employees() {
     name: '',
     employeeCode: '',
     role: 'staff',
-    branchId: '',
+    branchIds: [] as number[],
     permissions: [] as string[]
   });
   const [addLoading, setAddLoading] = useState(false);
   const [addError, setAddError] = useState('');
-  const [branches, setBranches] = useState<any[]>([]);
+  const [branches, setBranches] = useState<Array<{ id: number; name: string; code: string }>>([]);
 
   const [showPermModal, setShowPermModal] = useState(false);
   const [selectedEmp, setSelectedEmp] = useState<Employee | null>(null);
   const [tempPerms, setTempPerms] = useState<string[]>([]);
 
+  // Branch assignment states
+  const [branchAssignments, setBranchAssignments] = useState<Record<number, BranchInfo[]>>({});
+  const [showBranchModal, setShowBranchModal] = useState(false);
+  const [branchModalEmp, setBranchModalEmp] = useState<Employee | null>(null);
+  const [tempBranchIds, setTempBranchIds] = useState<number[]>([]);
+  const [branchSaving, setBranchSaving] = useState(false);
+
   const fetchData = async () => {
     try {
       const token = await auth.currentUser?.getIdToken();
+      const headers = { Authorization: `Bearer ${token}` };
       const [usersRes, branchesRes] = await Promise.all([
-        fetch("/api/users", { headers: { Authorization: `Bearer ${token}` } }),
-        fetch("/api/branches", { headers: { Authorization: `Bearer ${token}` } })
+        fetch("/api/users", { headers }),
+        fetch("/api/branches", { headers })
       ]);
-      
+
+      let employeeList: Employee[] = [];
       if (usersRes.ok) {
-        const data = await usersRes.json();
-        setEmployees(data);
+        employeeList = await usersRes.json();
+        setEmployees(employeeList);
       }
       if (branchesRes.ok) {
         const data = await branchesRes.json();
         setBranches(data);
+      }
+
+      // Admin: batch fetch branch assignments cho tất cả NV non-admin
+      if (dbUser?.role === "admin" && employeeList.length > 0) {
+        const nonAdminEmps = employeeList.filter((e) => e.role !== "admin");
+        const assignmentResults = await Promise.all(
+          nonAdminEmps.map((emp) =>
+            fetch(`/api/users/${emp.id}/branches`, { headers })
+              .then((r) => (r.ok ? r.json() : { userId: emp.id, branches: [] }))
+              .catch(() => ({ userId: emp.id, branches: [] }))
+          )
+        );
+
+        const assignmentMap: Record<number, BranchInfo[]> = {};
+        for (const result of assignmentResults) {
+          assignmentMap[result.userId] = result.branches || [];
+        }
+        setBranchAssignments(assignmentMap);
       }
     } catch (err) {
       console.error(err);
@@ -119,25 +152,82 @@ export function Employees() {
     setShowPermModal(true);
   };
 
+  const openBranchModal = (emp: Employee) => {
+    setBranchModalEmp(emp);
+    const assigned = branchAssignments[emp.id] || [];
+    setTempBranchIds(assigned.map((b) => b.branchId));
+    setShowBranchModal(true);
+  };
+
+  const handleSaveBranches = async () => {
+    if (!branchModalEmp) return;
+    setBranchSaving(true);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const res = await fetch(`/api/users/${branchModalEmp.id}/branches`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ branchIds: tempBranchIds }),
+      });
+
+      if (res.ok) {
+        setShowBranchModal(false);
+        fetchData();
+      } else {
+        const data = await res.json();
+        alert(data.error || "Cập nhật cơ sở thất bại.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Lỗi kết nối");
+    } finally {
+      setBranchSaving(false);
+    }
+  };
+
   const handleAddEmployee = async (e: React.FormEvent) => {
     e.preventDefault();
     setAddLoading(true);
     setAddError('');
     try {
       const token = await auth.currentUser?.getIdToken();
+      const headers = {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      };
+
+      // Tạo user (branchId = cơ sở đầu tiên cho backward compat)
+      const createPayload = {
+        email: addForm.email,
+        name: addForm.name,
+        employeeCode: addForm.employeeCode,
+        role: addForm.role,
+        branchId: addForm.branchIds.length > 0 ? addForm.branchIds[0] : null,
+        permissions: addForm.permissions,
+      };
+
       const res = await fetch("/api/users", {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(addForm)
+        method: "POST",
+        headers,
+        body: JSON.stringify(createPayload),
       });
-      
+
       const data = await res.json();
       if (res.ok) {
+        // Sau khi tạo, gán cơ sở nếu có chọn
+        if (addForm.branchIds.length > 0 && data.id) {
+          await fetch(`/api/users/${data.id}/branches`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({ branchIds: addForm.branchIds }),
+          });
+        }
+
         setShowAddModal(false);
-        setAddForm({ email: '', name: '', employeeCode: '', role: 'staff', branchId: '', permissions: [] });
+        setAddForm({ email: '', name: '', employeeCode: '', role: 'staff', branchIds: [], permissions: [] });
         fetchData();
       } else {
         setAddError(data.error || "Có lỗi xảy ra");
@@ -215,12 +305,27 @@ export function Employees() {
                   <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-700">
                     {emp.employeeCode || <span className="text-slate-400 italic">Chưa có</span>}
                   </td>
-                  <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-700">
+                  <td className="px-6 py-4 text-sm text-slate-700">
                     {emp.role === 'admin' ? (
                        <span className="text-slate-500">Toàn hệ thống</span>
-                    ) : (
-                       branches.find(b => b.id === emp.branchId)?.name || <span className="text-slate-400 italic">Chưa phân công</span>
-                    )}
+                    ) : (() => {
+                       const assigned = branchAssignments[emp.id] || [];
+                       if (assigned.length === 0) {
+                         return <span className="text-slate-400 italic">Chưa phân cơ sở</span>;
+                       }
+                       return (
+                         <div className="flex flex-wrap gap-1">
+                           {assigned.map((b) => (
+                             <span
+                               key={b.branchId}
+                               className="inline-flex items-center rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-inset ring-indigo-600/20"
+                             >
+                               {b.branchName}
+                             </span>
+                           ))}
+                         </div>
+                       );
+                    })()}
                   </td>
                   <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-700">
                     {emp.inviteCode ? (
@@ -251,14 +356,24 @@ export function Employees() {
                   </td>
                   <td className="whitespace-nowrap px-6 py-4 text-right text-sm">
                     {emp.role !== 'admin' && (
-                      <button
-                        onClick={() => openPermModal(emp)}
-                        disabled={dbUser?.role !== 'admin'}
-                        className="inline-flex items-center gap-2 rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:bg-slate-50 disabled:text-slate-400"
-                      >
-                        <Shield className="h-4 w-4" />
-                        Phân quyền
-                      </button>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => openBranchModal(emp)}
+                          disabled={dbUser?.role !== 'admin'}
+                          className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:bg-slate-50 disabled:text-slate-400"
+                        >
+                          <Building2 className="h-4 w-4" />
+                          Cơ sở
+                        </button>
+                        <button
+                          onClick={() => openPermModal(emp)}
+                          disabled={dbUser?.role !== 'admin'}
+                          className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:bg-slate-50 disabled:text-slate-400"
+                        >
+                          <Shield className="h-4 w-4" />
+                          Quyền
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -339,17 +454,30 @@ export function Employees() {
 
               {addForm.role !== 'admin' && (
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Cơ sở phụ trách</label>
-                  <select
-                    value={addForm.branchId}
-                    onChange={(e) => setAddForm({...addForm, branchId: e.target.value})}
-                    className="block w-full rounded-md border-0 py-1.5 text-slate-900 shadow-sm ring-1 ring-inset ring-slate-300 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm sm:leading-6"
-                  >
-                    <option value="">-- Tất cả cơ sở --</option>
-                    {branches.map(b => (
-                      <option key={b.id} value={b.id}>{b.name}</option>
-                    ))}
-                  </select>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Cơ sở phụ trách</label>
+                  <div className="space-y-2 border border-slate-200 rounded-md p-3 max-h-40 overflow-y-auto">
+                    {branches.length === 0 ? (
+                      <p className="text-sm text-slate-400 italic">Chưa có cơ sở nào.</p>
+                    ) : (
+                      branches.map((b) => (
+                        <label key={`add-branch-${b.id}`} className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addForm.branchIds.includes(b.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setAddForm({ ...addForm, branchIds: [...addForm.branchIds, b.id] });
+                              } else {
+                                setAddForm({ ...addForm, branchIds: addForm.branchIds.filter((id) => id !== b.id) });
+                              }
+                            }}
+                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-600"
+                          />
+                          <span className="text-sm text-slate-700">{b.name}</span>
+                        </label>
+                      ))
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -455,6 +583,84 @@ export function Employees() {
                 className="rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500"
               >
                 Lưu phân quyền
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Branch Assignment Modal */}
+      {showBranchModal && branchModalEmp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Building2 className="h-5 w-5 text-indigo-600" />
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Phân cơ sở — {branchModalEmp.name || branchModalEmp.email}
+                </h3>
+              </div>
+              <button onClick={() => setShowBranchModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-sm text-slate-500">Chọn cơ sở nhân viên được truy cập:</p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (tempBranchIds.length === branches.length) {
+                    setTempBranchIds([]);
+                  } else {
+                    setTempBranchIds(branches.map((b) => b.id));
+                  }
+                }}
+                className="text-xs font-medium text-indigo-600 hover:text-indigo-800"
+              >
+                {tempBranchIds.length === branches.length ? "Bỏ chọn tất cả" : "Chọn tất cả"}
+              </button>
+            </div>
+
+            <div className="space-y-2 border border-slate-200 rounded-md p-3 max-h-52 overflow-y-auto">
+              {branches.length === 0 ? (
+                <p className="text-sm text-slate-400 italic">Chưa có cơ sở nào.</p>
+              ) : (
+                branches.map((b) => (
+                  <label key={`branch-modal-${b.id}`} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={tempBranchIds.includes(b.id)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setTempBranchIds([...tempBranchIds, b.id]);
+                        } else {
+                          setTempBranchIds(tempBranchIds.filter((id) => id !== b.id));
+                        }
+                      }}
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600"
+                    />
+                    <span className="text-sm text-slate-700">{b.name}</span>
+                    <span className="text-xs text-slate-400">({b.code})</span>
+                  </label>
+                ))
+              )}
+            </div>
+
+            <div className="mt-4 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowBranchModal(false)}
+                className="rounded-md px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleSaveBranches}
+                disabled={branchSaving}
+                className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {branchSaving ? "Đang lưu..." : "Lưu phân cơ sở"}
               </button>
             </div>
           </div>

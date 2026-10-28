@@ -6,7 +6,8 @@
  */
 import { db } from "../db/index.js";
 import { classes } from "../db/schema.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
+import type { Column, SQL } from "drizzle-orm";
 import type { AuthRequest } from "../middleware/auth.js";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -33,6 +34,25 @@ export const normalizeShiftTime = (value: unknown): string | null => {
   return `${pad(hour)}:${pad(minute)}:${pad(second)}`;
 };
 
+/**
+ * Tạo điều kiện SQL lọc theo cơ sở được phân quyền cho nhân viên.
+ *
+ * - Admin → `undefined` (xem tất cả; dùng trong `and()` sẽ tự bỏ qua).
+ * - Non-admin có 1 cơ sở → `eq(field, id)` (tối ưu, tránh IN khi không cần).
+ * - Non-admin có nhiều cơ sở → `inArray(field, ids)`.
+ * - Non-admin KHÔNG có cơ sở nào → `eq(field, -1)` (luôn trả rỗng, an toàn).
+ *
+ * @param req     Request đã qua requireAuth (có `dbUser` và `allowedBranchIds`)
+ * @param branchField  Cột branchId cần lọc (vd: `classes.branchId`, `branches.id`)
+ */
+export function getBranchFilter(req: AuthRequest, branchField: Column): SQL | undefined {
+  if (req.dbUser?.role === 'admin') return undefined;
+  const ids = req.allowedBranchIds;
+  if (!ids || ids.length === 0) return eq(branchField, -1);
+  if (ids.length === 1) return eq(branchField, ids[0]);
+  return inArray(branchField, ids);
+}
+
 /** Kiểm tra người dùng có được thao tác với lớp này không (theo vai trò và chi nhánh). */
 export const canManageClass = async (
   req: AuthRequest,
@@ -47,8 +67,11 @@ export const canManageClass = async (
   ];
   if (req.dbUser?.role === "teacher" && req.dbUser.id) {
     conditions.push(eq(classes.teacherId, req.dbUser.id));
-  } else if (req.dbUser?.branchId) {
-    conditions.push(eq(classes.branchId, req.dbUser.branchId));
+  } else {
+    // Lọc theo danh sách cơ sở được phân quyền (multi-branch).
+    // Thay thế logic cũ: eq(classes.branchId, req.dbUser.branchId) → chỉ 1 cơ sở.
+    const branchFilter = getBranchFilter(req, classes.branchId);
+    if (branchFilter) conditions.push(branchFilter);
   }
   const allowed = await db
     .select({ id: classes.id })

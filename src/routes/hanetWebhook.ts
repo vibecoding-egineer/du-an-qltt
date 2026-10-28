@@ -18,16 +18,18 @@ import {
   attendance,
   attendanceSessions,
   hanetPendingCheckins,
+  cameraDevices,
+  branches,
   settings,
 } from "../db/schema.js";
-import { eq, and, gte, lte, inArray, desc, isNull, sql } from "drizzle-orm";
+import { eq, and, gte, lte, inArray, desc, isNull, isNotNull, sql } from "drizzle-orm";
 import {
   verifyHanetHash,
   parseHanetTime,
   HANET_RECOGNIZED_PERSON_TYPES,
   type HanetWebhookPayload,
 } from "../lib/hanet.js";
-import { HANET_SESSION_EXPIRY_HOURS } from "./_helpers.js";
+import { getBranchFilter, HANET_SESSION_EXPIRY_HOURS } from "./_helpers.js";
 
 /* ================================================================
  * Cache Secret multi-tenant
@@ -116,16 +118,7 @@ export function registerHanetRoutes(app: Express): void {
     try {
       const payload = req.body as HanetWebhookPayload;
 
-      console.error(
-        "[HANET] nhan:",
-        JSON.stringify({
-          id: payload.id,
-          data_type: payload.data_type,
-          personID: payload.personID,
-          personName: payload.personName,
-          personType: payload.personType,
-        }),
-      );
+      console.error("[HANET] FULL payload:", JSON.stringify(req.body));
 
       /* --- Xác thực multi-tenant --- */
 
@@ -161,6 +154,79 @@ export function registerHanetRoutes(app: Express): void {
       }
 
       const tenantId = matchedTenants[0];
+
+      /* --- Tra cứu camera → branchId bằng deviceId hoặc placeName --- */
+
+      let resolvedBranchId: number | null = null;
+
+      const payloadPlaceId = payload.placeID;
+      const payloadDeviceId = payload.deviceID;
+      const payloadPlaceName = payload.placeName;
+
+      // Ưu tiên 1: Match chính xác theo serial camera (deviceId)
+      if (payloadDeviceId) {
+        const deviceRows = await db
+          .select({
+            id: cameraDevices.id,
+            branchId: cameraDevices.branchId,
+            placeId: cameraDevices.placeId,
+          })
+          .from(cameraDevices)
+          .where(
+            and(
+              eq(cameraDevices.tenantId, tenantId),
+              eq(cameraDevices.deviceId, payloadDeviceId),
+              eq(cameraDevices.isDeleted, false),
+            ),
+          )
+          .limit(1);
+
+        if (deviceRows.length > 0) {
+          resolvedBranchId = deviceRows[0].branchId;
+          // Auto-fill placeId từ webhook nếu mapping chưa có (best-effort)
+          if (!deviceRows[0].placeId && payloadPlaceId) {
+            db.update(cameraDevices)
+              .set({ placeId: payloadPlaceId })
+              .where(eq(cameraDevices.id, deviceRows[0].id))
+              .catch((err: unknown) =>
+                console.error("[HANET] Auto-fill placeId lỗi:", err),
+              );
+          }
+        }
+      }
+
+      // Ưu tiên 2: Fallback theo tên địa điểm (placeName, chỉ mapping place-level: deviceId IS NULL)
+      if (resolvedBranchId === null && payloadPlaceName) {
+        const placeRows = await db
+          .select({
+            id: cameraDevices.id,
+            branchId: cameraDevices.branchId,
+            placeId: cameraDevices.placeId,
+          })
+          .from(cameraDevices)
+          .where(
+            and(
+              eq(cameraDevices.tenantId, tenantId),
+              eq(cameraDevices.placeName, payloadPlaceName),
+              isNull(cameraDevices.deviceId),
+              eq(cameraDevices.isDeleted, false),
+            ),
+          )
+          .limit(1);
+
+        if (placeRows.length > 0) {
+          resolvedBranchId = placeRows[0].branchId;
+          // Auto-fill placeId từ webhook nếu mapping chưa có (best-effort)
+          if (!placeRows[0].placeId && payloadPlaceId) {
+            db.update(cameraDevices)
+              .set({ placeId: payloadPlaceId })
+              .where(eq(cameraDevices.id, placeRows[0].id))
+              .catch((err: unknown) =>
+                console.error("[HANET] Auto-fill placeId lỗi:", err),
+              );
+          }
+        }
+      }
 
       /* --- Chỉ xử lý sự kiện log (check-in) --- */
 
@@ -202,6 +268,7 @@ export function registerHanetRoutes(app: Express): void {
           .insert(hanetPendingCheckins)
           .values({
             tenantId,
+            branchId: resolvedBranchId,
             hanetRecordId: payload.id,
             hanetPersonId: personID,
             personName: personName || null,
@@ -235,6 +302,7 @@ export function registerHanetRoutes(app: Express): void {
           .insert(hanetPendingCheckins)
           .values({
             tenantId,
+            branchId: resolvedBranchId,
             hanetRecordId: payload.id,
             hanetPersonId: personID,
             personName: personName || student.name,
@@ -272,6 +340,7 @@ export function registerHanetRoutes(app: Express): void {
           .insert(hanetPendingCheckins)
           .values({
             tenantId,
+            branchId: resolvedBranchId,
             hanetRecordId: payload.id,
             hanetPersonId: personID,
             personName: personName || student.name,
@@ -349,13 +418,19 @@ export function registerHanetRoutes(app: Express): void {
             imageUrl: hanetPendingCheckins.imageUrl,
             reason: hanetPendingCheckins.reason,
             createdAt: hanetPendingCheckins.createdAt,
+            branchId: hanetPendingCheckins.branchId,
             studentName: students.name,
             studentCode: students.studentCode,
+            branchName: branches.name,
           })
           .from(hanetPendingCheckins)
           .leftJoin(
             students,
             eq(hanetPendingCheckins.studentId, students.id),
+          )
+          .leftJoin(
+            branches,
+            eq(hanetPendingCheckins.branchId, branches.id),
           )
           .where(
             and(
@@ -408,21 +483,22 @@ export function registerHanetRoutes(app: Express): void {
               .status(403)
               .json({ error: "Bạn không phụ trách lớp này" });
           }
-        } else if (req.dbUser.role !== "admin" && req.dbUser.branchId) {
+        } else if (req.dbUser.role !== "admin") {
+          const branchFilter = getBranchFilter(req, classes.branchId);
           const allowed = await db
             .select({ id: classes.id })
             .from(classes)
             .where(
               and(
                 eq(classes.tenantId, tenantId),
-                eq(classes.branchId, req.dbUser.branchId),
+                branchFilter,
                 eq(classes.id, parsedClassId),
               ),
             );
           if (allowed.length === 0) {
             return res
               .status(403)
-              .json({ error: "Lớp này không thuộc chi nhánh của bạn" });
+              .json({ error: "Lớp này không thuộc cơ sở của bạn" });
           }
         }
 

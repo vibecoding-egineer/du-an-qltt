@@ -5,25 +5,19 @@ import { db } from "../db/index.js";
 import { insertReturning, updateReturning } from "../db/helpers.js";
 import { branches } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
+import { getBranchFilter } from "./_helpers.js";
 
 export function registerBranchRoutes(app: Express): void {
   app.get("/api/branches", requireAuth, async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
 
-      let query = db
+      // Admin: xem tất cả. Non-admin: chỉ thấy cơ sở được phân quyền.
+      const branchFilter = getBranchFilter(req, branches.id);
+      const result = await db
         .select()
         .from(branches)
-        .where(eq(branches.tenantId, tenantId)) as any;
-      if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        query = db
-          .select()
-          .from(branches)
-          .where(
-            and(eq(branches.tenantId, tenantId), eq(branches.id, req.dbUser.branchId)),
-          ) as any;
-      }
-      const result = await query;
+        .where(and(eq(branches.tenantId, tenantId), branchFilter));
       res.json(result);
     } catch (error: unknown) {
       console.error(error);

@@ -47,6 +47,7 @@ import { navigation } from "./components/Sidebar";
 import { Shifts } from "./pages/Shifts";
 import { StaffShifts } from "./pages/StaffShifts";
 import { StaffAttendance } from "./pages/StaffAttendance";
+import { Payroll } from "./pages/Payroll";
 import {
   SetupModule,
   OperationsModule,
@@ -134,6 +135,7 @@ export default function App() {
               <Route path="hanet-checkins" element={<HanetQueue />} />
               <Route path="finance" element={<Finance />} />
               <Route path="promotions" element={<Promotions />} />
+              <Route path="payroll" element={<Payroll />} />
 
               {/* ── Module routes (Bước 4 – UI Redesign) ── */}
               <Route path="setup" element={<SetupModule />} />

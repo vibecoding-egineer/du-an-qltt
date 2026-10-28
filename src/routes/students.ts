@@ -10,6 +10,7 @@ import {
   attendance,
 } from "../db/schema.js";
 import { eq, and, or, like, gte, lte, inArray, sql } from "drizzle-orm";
+import { getBranchFilter } from "./_helpers.js";
 
 export function registerStudentRoutes(app: Express): void {
   app.get("/api/students", requireAuth, async (req: AuthRequest, res) => {
@@ -22,8 +23,9 @@ export function registerStudentRoutes(app: Express): void {
         const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id)));
         allowedClassIds = allowedClasses.map((c) => c.id);
         if (allowedClassIds.length === 0) return res.json([]);
-      } else if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId)));
+      } else if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter));
         allowedClassIds = allowedClasses.map((c) => c.id);
         if (allowedClassIds.length === 0) return res.json([]);
       }
@@ -149,10 +151,11 @@ export function registerStudentRoutes(app: Express): void {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { name, studentCode, phone, classId, tuitionStatus, tuitionOwed, dob, gender, entryLevel, enrollmentDate, tuitionFee, parentName, parentPhone, address, note } = req.body;
 
-      if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parseInt(classId))));
+      if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter, eq(classes.id, parseInt(classId))));
         if (allowedClasses.length === 0) {
-          return res.status(403).json({ error: "Forbidden: Cannot add student to this class" });
+          return res.status(403).json({ error: "Bạn không có quyền thêm học viên vào lớp này." });
         }
       }
 
@@ -209,10 +212,11 @@ export function registerStudentRoutes(app: Express): void {
         return res.status(400).json({ error: "Invalid data" });
       }
 
-      if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parseInt(classId))));
+      if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowedClasses = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter, eq(classes.id, parseInt(classId))));
         if (allowedClasses.length === 0) {
-          return res.status(403).json({ error: "Forbidden" });
+          return res.status(403).json({ error: "Bạn không có quyền thêm học viên vào lớp này." });
         }
       }
 
@@ -354,10 +358,11 @@ export function registerStudentRoutes(app: Express): void {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const studentId = parseInt(req.params.id);
 
-      if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowed = await db.select({ id: classEnrollments.id }).from(classEnrollments).innerJoin(classes, eq(classEnrollments.classId, classes.id)).where(and(eq(classEnrollments.studentId, studentId), eq(classEnrollments.tenantId, tenantId), eq(classEnrollments.isDeleted, false), eq(classes.branchId, req.dbUser.branchId))).limit(1);
+      if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowed = await db.select({ id: classEnrollments.id }).from(classEnrollments).innerJoin(classes, eq(classEnrollments.classId, classes.id)).where(and(eq(classEnrollments.studentId, studentId), eq(classEnrollments.tenantId, tenantId), eq(classEnrollments.isDeleted, false), branchFilter)).limit(1);
         if (allowed.length === 0) {
-          return res.status(403).json({ error: "Bạn không có quyền thao tác với học viên ngoài chi nhánh mình." });
+          return res.status(403).json({ error: "Bạn không có quyền thao tác với học viên ngoài cơ sở mình." });
         }
       }
 

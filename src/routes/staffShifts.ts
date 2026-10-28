@@ -16,6 +16,7 @@ import { db } from "../db/index.js";
 import { insertReturning, updateReturning } from "../db/helpers.js";
 import { staffShifts, shifts, users } from "../db/schema.js";
 import { eq, and, gte, lte, inArray } from "drizzle-orm";
+import { getBranchFilter } from "./_helpers.js";
 
 export function registerStaffShiftRoutes(app: Express): void {
   /**
@@ -44,12 +45,13 @@ export function registerStaffShiftRoutes(app: Express): void {
       if (req.dbUser?.role === "teacher" || req.dbUser?.role === "staff") {
         // NV / giáo viên chỉ xem ca của chính mình
         conditions.push(eq(staffShifts.userId, req.dbUser.id));
-      } else if (req.dbUser?.role === "manager" && req.dbUser.branchId) {
-        // Manager xem NV cùng chi nhánh
+      } else if (req.dbUser?.role === "manager") {
+        // Manager xem NV thuộc các cơ sở được phân quyền
+        const branchFilter = getBranchFilter(req, users.branchId);
         const branchUsers = await db
           .select({ id: users.id })
           .from(users)
-          .where(and(eq(users.tenantId, tenantId), eq(users.branchId, req.dbUser.branchId)));
+          .where(and(eq(users.tenantId, tenantId), branchFilter));
         const branchUserIds = branchUsers.map((u) => u.id);
         if (branchUserIds.length === 0) return res.json([]);
         conditions.push(inArray(staffShifts.userId, branchUserIds));
@@ -97,15 +99,16 @@ export function registerStaffShiftRoutes(app: Express): void {
           return res.status(400).json({ error: "Thiếu thông tin nhân viên, ca hoặc ngày." });
         }
 
-        // Manager chỉ phân ca cho NV cùng chi nhánh
-        if (req.dbUser?.role === "manager" && req.dbUser.branchId) {
+        // Manager chỉ phân ca cho NV thuộc cơ sở mình quản lý
+        if (req.dbUser?.role === "manager") {
           const target = await db
             .select({ branchId: users.branchId })
             .from(users)
             .where(and(eq(users.id, parseInt(userId)), eq(users.tenantId, tenantId)))
             .limit(1);
-          if (target.length === 0 || target[0].branchId !== req.dbUser.branchId) {
-            return res.status(403).json({ error: "Nhân viên này không thuộc chi nhánh của bạn." });
+          const targetBranchId = target[0]?.branchId;
+          if (target.length === 0 || targetBranchId === null || !req.allowedBranchIds?.includes(targetBranchId)) {
+            return res.status(403).json({ error: "Nhân viên này không thuộc cơ sở bạn quản lý." });
           }
         }
 
@@ -164,15 +167,16 @@ export function registerStaffShiftRoutes(app: Express): void {
         const parsedUserId = parseInt(userId);
         const parsedShiftId = parseInt(shiftId);
 
-        // Manager chỉ phân ca cho NV cùng chi nhánh
-        if (req.dbUser?.role === "manager" && req.dbUser.branchId) {
+        // Manager chỉ phân ca cho NV thuộc cơ sở mình quản lý
+        if (req.dbUser?.role === "manager") {
           const target = await db
             .select({ branchId: users.branchId })
             .from(users)
             .where(and(eq(users.id, parsedUserId), eq(users.tenantId, tenantId)))
             .limit(1);
-          if (target.length === 0 || target[0].branchId !== req.dbUser.branchId) {
-            return res.status(403).json({ error: "Nhân viên này không thuộc chi nhánh của bạn." });
+          const targetBranchId = target[0]?.branchId;
+          if (target.length === 0 || targetBranchId === null || !req.allowedBranchIds?.includes(targetBranchId)) {
+            return res.status(403).json({ error: "Nhân viên này không thuộc cơ sở bạn quản lý." });
           }
         }
 
@@ -230,8 +234,8 @@ export function registerStaffShiftRoutes(app: Express): void {
         const tenantId = req.dbUser?.tenantId || req.user!.uid;
         const assignmentId = parseInt(req.params.id);
 
-        // Manager chỉ xóa phân ca của NV cùng chi nhánh
-        if (req.dbUser?.role === "manager" && req.dbUser.branchId) {
+        // Manager chỉ xóa phân ca của NV thuộc cơ sở mình quản lý
+        if (req.dbUser?.role === "manager") {
           const assignment = await db
             .select({ userId: staffShifts.userId })
             .from(staffShifts)
@@ -252,8 +256,9 @@ export function registerStaffShiftRoutes(app: Express): void {
             .from(users)
             .where(eq(users.id, assignment[0].userId))
             .limit(1);
-          if (target.length === 0 || target[0].branchId !== req.dbUser.branchId) {
-            return res.status(403).json({ error: "Nhân viên này không thuộc chi nhánh của bạn." });
+          const targetBranchId = target[0]?.branchId;
+          if (target.length === 0 || targetBranchId === null || !req.allowedBranchIds?.includes(targetBranchId)) {
+            return res.status(403).json({ error: "Nhân viên này không thuộc cơ sở bạn quản lý." });
           }
         }
 

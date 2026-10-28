@@ -4,7 +4,7 @@ import { db } from "../db/index.js";
 import { insertReturning, updateReturning } from "../db/helpers.js";
 import { classes, attendance, attendanceSessions } from "../db/schema.js";
 import { eq, and, gte, lte, inArray, desc, isNull } from "drizzle-orm";
-import { canManageClass, HANET_SESSION_EXPIRY_HOURS } from "./_helpers.js";
+import { canManageClass, getBranchFilter, HANET_SESSION_EXPIRY_HOURS } from "./_helpers.js";
 
 export function registerAttendanceRoutes(app: Express): void {
   // ===== Điểm danh =====
@@ -19,8 +19,9 @@ export function registerAttendanceRoutes(app: Express): void {
       if (req.dbUser?.role === "teacher") {
         const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.id, parseInt(classId as string))));
         if (allowed.length === 0) return res.status(403).json({ error: "Forbidden access to this class" });
-      } else if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parseInt(classId as string))));
+      } else if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter, eq(classes.id, parseInt(classId as string))));
         if (allowed.length === 0) return res.status(403).json({ error: "Forbidden access to this class" });
       }
 
@@ -44,8 +45,9 @@ export function registerAttendanceRoutes(app: Express): void {
       if (req.dbUser?.role === "teacher") {
         const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.id, parseInt(classId))));
         if (allowed.length === 0) return res.status(403).json({ error: "Forbidden access to this class" });
-      } else if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parseInt(classId))));
+      } else if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter, eq(classes.id, parseInt(classId))));
         if (allowed.length === 0) return res.status(403).json({ error: "Forbidden access to this class" });
       }
 
@@ -74,8 +76,9 @@ export function registerAttendanceRoutes(app: Express): void {
       if (req.dbUser?.role === "teacher") {
         const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.isDeleted, false)));
         allowedClassIds = allowed.map((c) => c.id);
-      } else if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.isDeleted, false)));
+      } else if (req.dbUser?.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter, eq(classes.isDeleted, false)));
         allowedClassIds = allowed.map((c) => c.id);
       }
       if (allowedClassIds && allowedClassIds.length === 0) return res.json([]);
@@ -106,9 +109,10 @@ export function registerAttendanceRoutes(app: Express): void {
       if (req.dbUser.role === "teacher") {
         const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.teacherId, req.dbUser.id), eq(classes.id, parsedClassId), eq(classes.isDeleted, false)));
         if (allowed.length === 0) return res.status(403).json({ error: "Bạn không phụ trách lớp này" });
-      } else if (req.dbUser.role !== "admin" && req.dbUser.branchId) {
-        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), eq(classes.branchId, req.dbUser.branchId), eq(classes.id, parsedClassId), eq(classes.isDeleted, false)));
-        if (allowed.length === 0) return res.status(403).json({ error: "Lớp này không thuộc chi nhánh của bạn" });
+      } else if (req.dbUser.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.tenantId, tenantId), branchFilter, eq(classes.id, parsedClassId), eq(classes.isDeleted, false)));
+        if (allowed.length === 0) return res.status(403).json({ error: "Lớp này không thuộc cơ sở của bạn" });
       }
 
       const sessionExpiry = new Date(Date.now() - HANET_SESSION_EXPIRY_HOURS * 60 * 60 * 1000);
@@ -177,9 +181,10 @@ export function registerAttendanceRoutes(app: Express): void {
       if (req.dbUser.role === "teacher") {
         const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.id, session.classId), eq(classes.teacherId, req.dbUser.id)));
         if (allowed.length === 0) return res.status(403).json({ error: "Bạn không phụ trách lớp này" });
-      } else if (req.dbUser.role !== "admin" && req.dbUser.branchId) {
-        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.id, session.classId), eq(classes.branchId, req.dbUser.branchId)));
-        if (allowed.length === 0) return res.status(403).json({ error: "Lớp này không thuộc chi nhánh của bạn" });
+      } else if (req.dbUser.role !== "admin") {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        const allowed = await db.select({ id: classes.id }).from(classes).where(and(eq(classes.id, session.classId), branchFilter));
+        if (allowed.length === 0) return res.status(403).json({ error: "Lớp này không thuộc cơ sở của bạn" });
       }
 
       const result = await updateReturning(db, attendanceSessions, { closedAt: new Date() }, and(eq(attendanceSessions.id, sessionId), eq(attendanceSessions.tenantId, tenantId), isNull(attendanceSessions.closedAt)));

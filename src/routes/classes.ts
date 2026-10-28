@@ -5,42 +5,26 @@ import { db } from "../db/index.js";
 import { insertReturning, updateReturning } from "../db/helpers.js";
 import { classes, classEnrollments } from "../db/schema.js";
 import { eq, and } from "drizzle-orm";
+import { getBranchFilter } from "./_helpers.js";
 
 export function registerClassRoutes(app: Express): void {
   app.get("/api/classes", requireAuth, async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
 
-      let query = db
+      // Teacher: chỉ thấy lớp mình dạy.
+      // Admin: tất cả. Non-admin: lọc theo cơ sở được phân quyền.
+      const conditions = [eq(classes.tenantId, tenantId), eq(classes.isDeleted, false)];
+      if (req.dbUser?.role === "teacher") {
+        conditions.push(eq(classes.teacherId, req.dbUser.id));
+      } else {
+        const branchFilter = getBranchFilter(req, classes.branchId);
+        if (branchFilter) conditions.push(branchFilter);
+      }
+      const classesData = await db
         .select()
         .from(classes)
-        .where(
-          and(eq(classes.tenantId, tenantId), eq(classes.isDeleted, false)),
-        ) as any;
-      if (req.dbUser?.role === "teacher") {
-        query = db
-          .select()
-          .from(classes)
-          .where(
-            and(
-              eq(classes.tenantId, tenantId),
-              eq(classes.isDeleted, false),
-              eq(classes.teacherId, req.dbUser.id),
-            ),
-          ) as any;
-      } else if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
-        query = db
-          .select()
-          .from(classes)
-          .where(
-            and(
-              eq(classes.tenantId, tenantId),
-              eq(classes.isDeleted, false),
-              eq(classes.branchId, req.dbUser.branchId),
-            ),
-          ) as any;
-      }
-      const classesData = await query;
+        .where(and(...conditions));
       const allEnrollments = await db
         .select({ classId: classEnrollments.classId })
         .from(classEnrollments)
@@ -51,7 +35,7 @@ export function registerClassRoutes(app: Express): void {
           ),
         );
 
-      const result = classesData.map((c: any) => {
+      const result = classesData.map((c) => {
         const studentCount = allEnrollments.filter(
           (s) => s.classId === c.id,
         ).length;
@@ -81,13 +65,20 @@ export function registerClassRoutes(app: Express): void {
           feeMethod,
         } = req.body;
 
+        // Non-admin: branchId phải nằm trong danh sách cơ sở được phân quyền.
         if (req.dbUser?.role !== "admin") {
-          if (!req.dbUser?.branchId) {
+          const ids = req.allowedBranchIds;
+          if (!ids || ids.length === 0) {
             return res.status(403).json({
-              error: "You must be assigned to a branch to create classes.",
+              error: "Bạn chưa được phân quyền vào cơ sở nào để tạo lớp.",
             });
           }
-          branchId = req.dbUser.branchId;
+          const parsedBranchId = parseInt(branchId);
+          if (!branchId || isNaN(parsedBranchId) || !ids.includes(parsedBranchId)) {
+            return res.status(403).json({
+              error: "Bạn không có quyền tạo lớp ở cơ sở này.",
+            });
+          }
         }
 
         const result = await insertReturning(db, classes, {
@@ -126,24 +117,33 @@ export function registerClassRoutes(app: Express): void {
           feeMethod,
         } = req.body;
 
-        if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
+        // Non-admin: chỉ sửa lớp thuộc cơ sở mình quản lý,
+        // và branchId mới (nếu đổi) cũng phải nằm trong danh sách.
+        if (req.dbUser?.role !== "admin") {
+          const branchFilter = getBranchFilter(req, classes.branchId);
           const allowed = await db
             .select({ id: classes.id })
             .from(classes)
             .where(
               and(
                 eq(classes.tenantId, tenantId),
-                eq(classes.branchId, req.dbUser.branchId),
+                branchFilter,
                 eq(classes.id, parseInt(id)),
                 eq(classes.isDeleted, false),
               ),
             );
           if (allowed.length === 0) {
             return res.status(403).json({
-              error: "Forbidden: Cannot edit class in this branch",
+              error: "Bạn không có quyền sửa lớp này.",
             });
           }
-          branchId = req.dbUser.branchId;
+          // Validate branchId mới phải trong danh sách được phân quyền
+          const parsedBranchId = parseInt(branchId);
+          if (!req.allowedBranchIds?.includes(parsedBranchId)) {
+            return res.status(403).json({
+              error: "Bạn không có quyền chuyển lớp sang cơ sở này.",
+            });
+          }
         }
 
         const result = await updateReturning(
@@ -184,21 +184,23 @@ export function registerClassRoutes(app: Express): void {
         const { id } = req.params;
         const classId = parseInt(id);
 
-        if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
+        // Non-admin: chỉ xóa lớp thuộc cơ sở mình quản lý.
+        if (req.dbUser?.role !== "admin") {
+          const branchFilter = getBranchFilter(req, classes.branchId);
           const allowed = await db
             .select({ id: classes.id })
             .from(classes)
             .where(
               and(
                 eq(classes.tenantId, tenantId),
-                eq(classes.branchId, req.dbUser.branchId),
+                branchFilter,
                 eq(classes.id, classId),
                 eq(classes.isDeleted, false),
               ),
             );
           if (allowed.length === 0) {
             return res.status(403).json({
-              error: "Forbidden: Cannot delete class in this branch",
+              error: "Bạn không có quyền xóa lớp này.",
             });
           }
         }

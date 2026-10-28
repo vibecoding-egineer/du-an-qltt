@@ -16,7 +16,7 @@
  *   Thiết lập:    10 features (5 active)
  *   Vận hành:      6 features (4 active)
  *   CSKH:          5 features (0 active)
- *   Kế toán–NS:    8 features (6 active)
+ *   Kế toán–NS:    8 features (7 active)
  *   Giám đốc TT:   5 features (0 active)
  *
  * RBAC: ModulePage tự xử lý lọc theo quyền — xem ModulePage.tsx.
@@ -361,10 +361,10 @@ const ACCOUNTING_FEATURES: ModuleFeature[] = [
   /* ── Sắp ra mắt ── */
   {
     name: "Bảng lương",
-    description: "Tính lương, phụ cấp, thưởng cho nhân viên",
+    description: "Quản lý các loại lương: cố định, %, theo ca, theo giờ",
     href: "/payroll",
     icon: Banknote,
-    available: false,
+    available: true,
     roles: ["admin"],
   },
   {

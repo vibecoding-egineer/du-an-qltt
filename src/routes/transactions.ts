@@ -5,6 +5,7 @@ import { db } from "../db/index.js";
 import { insertReturning, updateReturning } from "../db/helpers.js";
 import { transactions, students } from "../db/schema.js";
 import { eq, and, gte, lte, desc } from "drizzle-orm";
+import { getBranchFilter } from "./_helpers.js";
 
 export function registerTransactionRoutes(app: Express): void {
   app.get("/api/transactions", requireAuth, async (req: AuthRequest, res) => {
@@ -12,7 +13,13 @@ export function registerTransactionRoutes(app: Express): void {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
       const { branchId, type, category, startDate, endDate } = req.query;
 
-      let conditions = [eq(transactions.tenantId, tenantId), eq(transactions.isDeleted, false)];
+      const conditions = [eq(transactions.tenantId, tenantId), eq(transactions.isDeleted, false)];
+
+      // Phân quyền theo cơ sở — non-admin chỉ thấy giao dịch thuộc cơ sở được phân
+      const branchFilter = getBranchFilter(req, transactions.branchId);
+      if (branchFilter) conditions.push(branchFilter);
+
+      // Filter thêm theo branchId từ query param (nếu có)
       if (branchId) conditions.push(eq(transactions.branchId, parseInt(branchId as string)));
       if (type) conditions.push(eq(transactions.type, type as string));
       if (category) conditions.push(eq(transactions.category, category as string));
@@ -50,10 +57,14 @@ export function registerTransactionRoutes(app: Express): void {
       let { branchId, type, category, amount, date, note, studentId } = req.body;
 
       if (req.dbUser?.role !== "admin") {
-        if (!req.dbUser?.branchId) {
-          return res.status(403).json({ error: "You must be assigned to a branch to create transactions." });
+        const ids = req.allowedBranchIds;
+        if (!ids || ids.length === 0) {
+          return res.status(403).json({ error: "Bạn chưa được phân quyền vào cơ sở nào để tạo giao dịch." });
         }
-        branchId = req.dbUser.branchId;
+        const parsedBranchId = parseInt(branchId);
+        if (!branchId || isNaN(parsedBranchId) || !ids.includes(parsedBranchId)) {
+          return res.status(403).json({ error: "Bạn không có quyền tạo giao dịch ở cơ sở này." });
+        }
       }
 
       const result = await insertReturning(db, transactions, {
@@ -75,7 +86,25 @@ export function registerTransactionRoutes(app: Express): void {
   app.delete("/api/transactions/:id", requireAuth, requireRole(["admin", "manager", "staff"]), async (req: AuthRequest, res) => {
     try {
       const tenantId = req.dbUser?.tenantId || req.user!.uid;
-      const result = await updateReturning(db, transactions, { isDeleted: true, deletedAt: new Date() }, and(eq(transactions.id, parseInt(req.params.id)), eq(transactions.tenantId, tenantId), eq(transactions.isDeleted, false)));
+      const recordId = parseInt(req.params.id);
+
+      // Non-admin: kiểm tra giao dịch thuộc cơ sở được phân quyền
+      if (req.dbUser?.role !== "admin") {
+        const existing = await db
+          .select({ branchId: transactions.branchId })
+          .from(transactions)
+          .where(and(eq(transactions.id, recordId), eq(transactions.tenantId, tenantId), eq(transactions.isDeleted, false)))
+          .limit(1);
+        if (existing.length === 0) {
+          return res.status(404).json({ error: "Không tìm thấy giao dịch." });
+        }
+        const targetBranchId = existing[0].branchId;
+        if (targetBranchId === null || !req.allowedBranchIds?.includes(targetBranchId)) {
+          return res.status(403).json({ error: "Bạn không có quyền xóa giao dịch ở cơ sở này." });
+        }
+      }
+
+      const result = await updateReturning(db, transactions, { isDeleted: true, deletedAt: new Date() }, and(eq(transactions.id, recordId), eq(transactions.tenantId, tenantId), eq(transactions.isDeleted, false)));
       res.json(result[0] || { success: true });
     } catch (error: unknown) {
       console.error(error);

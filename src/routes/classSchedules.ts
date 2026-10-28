@@ -15,7 +15,7 @@ import { db } from "../db/index.js";
 import { insertReturning, updateReturning } from "../db/helpers.js";
 import { classes, classSchedules, shifts } from "../db/schema.js";
 import { eq, and, inArray } from "drizzle-orm";
-import { canManageClass } from "./_helpers.js";
+import { canManageClass, getBranchFilter } from "./_helpers.js";
 
 export function registerClassScheduleRoutes(app: Express): void {
   // Truyền ?classId=... để lấy lịch của một lớp (dùng ở form sửa lớp).
@@ -38,14 +38,16 @@ export function registerClassScheduleRoutes(app: Express): void {
             ),
           );
         allowedClassIds = allowed.map((c) => c.id);
-      } else if (req.dbUser?.role !== "admin" && req.dbUser?.branchId) {
+      } else if (req.dbUser?.role !== "admin") {
+        // Non-admin, non-teacher: lọc lớp theo cơ sở được phân quyền (multi-branch).
+        const branchFilter = getBranchFilter(req, classes.branchId);
         const allowed = await db
           .select({ id: classes.id })
           .from(classes)
           .where(
             and(
               eq(classes.tenantId, tenantId),
-              eq(classes.branchId, req.dbUser.branchId),
+              branchFilter,
               eq(classes.isDeleted, false),
             ),
           );
